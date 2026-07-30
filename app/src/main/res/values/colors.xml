@@ -1,0 +1,5 @@
+<resources>
+    <!-- OneUI background grey used while the first Compose frame is pending. -->
+    <color name="window_background">#F6F6F6</color>
+    <color name="oneui_blue">#0381FE</color>
+</resources>

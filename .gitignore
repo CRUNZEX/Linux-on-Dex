@@ -1,0 +1,46 @@
+# ---- Gradle / build outputs --------------------------------------------------
+.gradle/
+build/
+**/build/
+local.properties
+
+# ---- Generated VM payload — recreate with tools/fetch_qemu_payload.py --------
+.payload-work/
+app/src/main/jniLibs/
+app/src/main/assets/vm/
+
+# ---- Deliverables — rebuilt by assembleRelease / build_ready_vm.py -----------
+dist/
+
+# ---- Signing — keep a private backup, never commit ---------------------------
+keystore/
+*.jks
+*.keystore
+
+# ---- IDE / editors ------------------------------------------------------------
+.idea/
+.vscode/
+*.iml
+.kotlin/
+
+# ---- Android tooling ----------------------------------------------------------
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+lint-results*
+
+# ---- Python tooling (tools/) --------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+
+# ---- OS junk -------------------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+
+# ---- Local scratch: reference APK/ISOs and working notes ----------------------
+test/
+markdown/
+*.log

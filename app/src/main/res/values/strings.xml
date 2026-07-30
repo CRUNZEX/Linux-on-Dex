@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">Linux on DeX</string>
+    <string name="notification_channel_vm">Virtual machine</string>
+    <string name="notification_vm_running">Linux VM is running</string>
+    <string name="notification_vm_stop">Stop</string>
+</resources>

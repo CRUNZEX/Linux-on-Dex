@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- TCP loopback sockets (QMP control channel, VNC display) need INTERNET
+         even though no traffic ever leaves the device. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- The Monitor screen lists plugged-in USB devices (view only; nothing
+         is ever attached to the VM). Not required, so the app still installs
+         on devices without USB-host support; the list is simply empty. -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+
+    <application
+        android:name=".LinuxOnDexApp"
+        android:allowBackup="false"
+        android:extractNativeLibs="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.LinuxOnDex">
+
+        <!-- Samsung DeX: keep the activity alive and resizable when the user
+             docks/undocks. These meta-data keys are documented in the Samsung
+             DeX developer guide and are ignored on non-Samsung devices. -->
+        <meta-data
+            android:name="com.samsung.android.keepalive.density"
+            android:value="true" />
+        <meta-data
+            android:name="com.samsung.android.multidisplay.keep_process_alive"
+            android:value="true" />
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Terminal and Display as separate tasks: on Samsung DeX each task
+             affinity becomes its own desktop window, so the shell and the
+             screen sit side by side. singleTask keeps one window per role —
+             relaunching focuses it instead of stacking duplicates. -->
+        <!-- documentLaunchMode + a per-console data URI gives every terminal
+             window its own task, so several can sit side by side on DeX;
+             relaunching the same console focuses its existing window. -->
+        <activity
+            android:name=".ui.TerminalActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"
+            android:documentLaunchMode="intoExisting"
+            android:exported="false"
+            android:label="Linux Terminal"
+            android:resizeableActivity="true"
+            android:taskAffinity="com.crunzex.linuxondex.window.terminal"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".ui.DisplayActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode"
+            android:exported="false"
+            android:label="Linux Display"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:taskAffinity="com.crunzex.linuxondex.window.display"
+            android:windowSoftInputMode="adjustResize" />
+
+        <service
+            android:name=".service.VmService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps a user-started Linux virtual machine running while the app is in the background." />
+        </service>
+    </application>
+</manifest>

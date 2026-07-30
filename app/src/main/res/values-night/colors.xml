@@ -1,0 +1,4 @@
+<resources>
+    <!-- Night override of the pre-Compose window background. -->
+    <color name="window_background">#010101</color>
+</resources>
