@@ -17,9 +17,18 @@ object TerminalColors {
     /**
      * ANSI colours 0-15 follow the widely-used "Tango dark" values, chosen
      * for legibility on the dark background above.
+     *
+     * Colour 0 is the one deliberate change: it is the terminal's own
+     * background rather than Tango's dark grey, exactly as every dark
+     * terminal scheme defines black. Anything else and "black background"
+     * is a *visible* rectangle — and because erasing and scrolling fill
+     * with the current background, a program that leaves `SGR 40` set
+     * paints every line that scrolls in afterwards. Alpine's boot menu
+     * ends on `ESC[0m ESC[37m ESC[40m` and never resets, so that band
+     * followed the whole boot down the screen.
      */
     private val ANSI_16 = intArrayOf(
-        0xFF2E3436.toInt(), // 0 black
+        DEFAULT_BACKGROUND, // 0 black — the background, so "on black" is invisible
         0xFFCC0000.toInt(), // 1 red
         0xFF4E9A06.toInt(), // 2 green
         0xFFC4A000.toInt(), // 3 yellow

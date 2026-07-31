@@ -15,11 +15,10 @@ android {
         // for current Samsung Galaxy S Ultra firmware.
         minSdk = 33
         targetSdk = 36
-        // First public release. versionCode keeps counting from the 0.x/2.x
-        // builds so devices that already have the app update in place —
-        // Android forbids downgrading it.
-        versionCode = 17
-        versionName = "1.0.0"
+        // versionCode keeps counting from the 0.x/2.x builds so devices that
+        // already have the app update in place — Android forbids downgrading it.
+        versionCode = 26
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -27,6 +26,7 @@ android {
             // Galaxy S Ultra devices and the ARM64 emulator are the only targets.
             abiFilters += "arm64-v8a"
         }
+
     }
 
     packaging {

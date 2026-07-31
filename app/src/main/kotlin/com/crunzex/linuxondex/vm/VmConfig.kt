@@ -19,6 +19,7 @@ data class VmConfig(
     val display: DisplayConfig = DisplayConfig(),
     val network: NetworkConfig = NetworkConfig(),
     val sharedFolder: SharedFolderConfig = SharedFolderConfig(),
+    val usb: UsbConfig = UsbConfig(),
     /** Absolute path of the installer ISO; null once installation finished. */
     val installerIsoPath: String? = null,
     /**
@@ -161,8 +162,15 @@ enum class CpuModel(
 @Serializable
 data class StorageConfig(
     val diskSizeGb: Int = 16,
-    val cacheMode: DiskCacheMode = DiskCacheMode.WRITEBACK,
     val diskInterface: DiskInterface = DiskInterface.VIRTIO_BLK,
+    /**
+     * How hard the disk path is tuned; see [DiskPerformance]. Defaults to
+     * the fastest setting, because emulated storage is what makes a
+     * software VM feel slow and a phone VM is rebuilt far more easily
+     * than it is waited on. Users who keep irreplaceable work inside the
+     * guest can move it down a notch.
+     */
+    val performance: DiskPerformance = DiskPerformance.MAXIMUM,
 ) {
     init {
         require(diskSizeGb in MIN_DISK_GB..MAX_DISK_GB) {
@@ -176,15 +184,52 @@ data class StorageConfig(
     }
 }
 
+/**
+ * How aggressively the guest's disk is tuned.
+ *
+ * Emulated storage is the slowest part of a software VM: every guest write
+ * crosses qcow2, the app sandbox and the phone's own filesystem. These
+ * profiles trade durability for speed in the three steps that actually
+ * matter, so the user picks an outcome rather than five separate knobs.
+ *
+ * [flushesToDisk] is what separates them: a profile that stops honouring
+ * the guest's flush requests is dramatically faster, and loses recent
+ * writes if the phone dies mid-run.
+ */
 @Serializable
-enum class DiskCacheMode(
-    val qemuValue: String,
+enum class DiskPerformance(
     val displayName: String,
     val description: String,
+    /** The `cache=` mode QEMU is given. */
+    val qemuCacheMode: String,
+    /** Whether guest flushes reach the phone's storage. */
+    val flushesToDisk: Boolean,
+    /** Run disk work on its own thread instead of the main loop. */
+    val usesDedicatedIoThread: Boolean,
 ) {
-    WRITEBACK("writeback", "Write-back", "Fastest; small risk on sudden power loss"),
-    WRITETHROUGH("writethrough", "Write-through", "Safest, noticeably slower"),
-    NONE("none", "No host cache", "Bypass Android's page cache"),
+    MAXIMUM(
+        "Maximum speed (default)",
+        "Ignores flush requests — much faster for installs, updates and " +
+            "everyday use. Shut the VM down cleanly; a crash or battery " +
+            "pull can corrupt the disk.",
+        qemuCacheMode = "unsafe",
+        flushesToDisk = false,
+        usesDedicatedIoThread = true,
+    ),
+    FAST(
+        "Balanced",
+        "Write-back caching on its own I/O thread; safe on a clean shutdown",
+        qemuCacheMode = "writeback",
+        flushesToDisk = true,
+        usesDedicatedIoThread = true,
+    ),
+    SAFEST(
+        "Safest",
+        "Every write reaches storage before the guest continues; slowest",
+        qemuCacheMode = "writethrough",
+        flushesToDisk = true,
+        usesDedicatedIoThread = false,
+    ),
 }
 
 @Serializable
@@ -252,6 +297,13 @@ data class PortForwardRule(
     val protocol: PortProtocol = PortProtocol.TCP,
     val hostPort: Int,
     val guestPort: Int,
+    /**
+     * True publishes the port on every interface (0.0.0.0) so other devices
+     * on the same network can reach the guest service; false keeps it on
+     * this phone only. Off by default, because opening a port to the local
+     * network is a decision the user should make deliberately.
+     */
+    val bindAllInterfaces: Boolean = false,
 ) {
     init {
         require(hostPort in NetworkConfig.MIN_HOST_PORT..NetworkConfig.MAX_PORT) {
@@ -262,12 +314,24 @@ data class PortForwardRule(
         }
     }
 
+    /** The address slirp binds the host side to. */
+    val bindAddress: String
+        get() = if (bindAllInterfaces) ALL_INTERFACES else LOCALHOST
+
     /** The exact slirp specification QEMU consumes, e.g. `tcp:127.0.0.1:8080-:80`. */
     val slirpSpecification: String
-        get() = "${protocol.qemuName}:127.0.0.1:$hostPort-:$guestPort"
+        get() = "${protocol.qemuName}:$bindAddress:$hostPort-:$guestPort"
 
     val displayText: String
-        get() = "${protocol.displayName} localhost:$hostPort → VM:$guestPort"
+        get() {
+            val host = if (bindAllInterfaces) "all interfaces" else "localhost"
+            return "${protocol.displayName} $host:$hostPort → VM:$guestPort"
+        }
+
+    companion object {
+        const val LOCALHOST = "127.0.0.1"
+        const val ALL_INTERFACES = "0.0.0.0"
+    }
 }
 
 @Serializable
@@ -324,6 +388,66 @@ data class SharedFolderConfig(
     companion object {
         const val DEFAULT_MOUNT_TAG = "android"
         private val SAFE_TAG_REGEX = Regex("^[A-Za-z0-9_-]{1,31}$")
+    }
+}
+
+// ---- USB --------------------------------------------------------------------
+
+/**
+ * A USB device, identified the way QEMU matches one: by its vendor and
+ * product ids, which stay the same across unplugging and replugging.
+ */
+@Serializable
+data class UsbDeviceSpec(
+    val vendorId: Int,
+    val productId: Int,
+    /** Human name for the UI, e.g. "Realtek USB Ethernet". */
+    val label: String = "",
+) {
+    init {
+        require(vendorId in 0..MAX_USB_ID) { "vendorId out of range: $vendorId" }
+        require(productId in 0..MAX_USB_ID) { "productId out of range: $productId" }
+    }
+
+    /** The lsusb-style pair, e.g. "0bda:8153". */
+    val idKey: String get() = "%04x:%04x".format(vendorId, productId)
+
+    companion object {
+        const val MAX_USB_ID = 0xFFFF
+    }
+}
+
+/**
+ * USB passthrough: every device switched on here is handed to the guest,
+ * and Android gives it up for as long as the VM runs.
+ *
+ * Any number of devices may be passed at once. Each one reaches QEMU as its
+ * own already-open descriptor, so devices no longer compete for a single
+ * slot the way they did while passthrough went through one environment
+ * variable.
+ */
+@Serializable
+data class UsbConfig(
+    val passthroughDevices: List<UsbDeviceSpec> = emptyList(),
+) {
+    val isEnabled: Boolean get() = passthroughDevices.isNotEmpty()
+
+    /** True when the device with this id is switched on. */
+    fun isPassedThrough(idKey: String): Boolean =
+        passthroughDevices.any { it.idKey == idKey }
+
+    /**
+     * The same configuration with [device] switched on or off.
+     *
+     * Matching is by id rather than by whole value: the label follows
+     * whatever Android reports for the device this time, and a renamed
+     * device must not silently become a second entry.
+     */
+    fun withDevice(device: UsbDeviceSpec, passedThrough: Boolean): UsbConfig {
+        val others = passthroughDevices.filterNot { it.idKey == device.idKey }
+        return copy(
+            passthroughDevices = if (passedThrough) others + device else others,
+        )
     }
 }
 

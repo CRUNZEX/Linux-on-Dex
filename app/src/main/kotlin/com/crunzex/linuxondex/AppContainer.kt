@@ -2,13 +2,17 @@ package com.crunzex.linuxondex
 
 import android.content.Context
 import com.crunzex.linuxondex.about.AboutRepository
+import com.crunzex.linuxondex.about.UpdateNotice
 import com.crunzex.linuxondex.capability.CapabilityProbe
+import com.crunzex.linuxondex.core.DiagnosticsLogExporter
 import com.crunzex.linuxondex.engine.qemu.QemuVmEngine
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.terminal.TerminalSession
 import com.crunzex.linuxondex.usb.UsbDeviceMonitor
+import com.crunzex.linuxondex.usb.UsbPassthroughManager
 import com.crunzex.linuxondex.vm.DiskImageManager
+import com.crunzex.linuxondex.vm.VmBackupManager
 import com.crunzex.linuxondex.vm.IsoRepository
 import com.crunzex.linuxondex.vm.PreparedImageRepository
 import com.crunzex.linuxondex.vm.VmController
@@ -27,11 +31,21 @@ class AppContainer(context: Context) {
 
     val vmPaths: VmPaths by lazy { VmPaths(appContext) }
 
+    /** Saves the recent log to Downloads for sharing. */
+    val logExporter: DiagnosticsLogExporter by lazy {
+        DiagnosticsLogExporter(appContext)
+    }
+
     val payloadInstaller: PayloadInstaller by lazy { PayloadInstaller(appContext, vmPaths) }
 
     val diskImageManager: DiskImageManager by lazy { DiskImageManager(vmPaths) }
 
     val vmRepository: VmRepository by lazy { VmRepository(vmPaths) }
+
+    /** Saves the VM disk to a file the user can copy off the phone. */
+    val vmBackupManager: VmBackupManager by lazy {
+        VmBackupManager(appContext, vmPaths, diskImageManager)
+    }
 
     val isoRepository: IsoRepository by lazy { IsoRepository(appContext, vmPaths) }
 
@@ -42,8 +56,16 @@ class AppContainer(context: Context) {
     /** Read-only USB listing for the Monitor screen; never touches the VM. */
     val usbDeviceMonitor: UsbDeviceMonitor by lazy { UsbDeviceMonitor(appContext) }
 
+    /** Hands one USB device to the guest while the VM runs. */
+    val usbPassthroughManager: UsbPassthroughManager by lazy {
+        UsbPassthroughManager(appContext)
+    }
+
     /** Developer profile, installed version and update check for About. */
     val aboutRepository: AboutRepository by lazy { AboutRepository(appContext) }
+
+    /** Remembers which release the user has already been shown. */
+    val updateNotice: UpdateNotice by lazy { UpdateNotice(appContext) }
 
     val vmController: VmController by lazy {
         VmController(
@@ -53,6 +75,11 @@ class AppContainer(context: Context) {
             diskManager = diskImageManager,
             repository = vmRepository,
             preparedImages = preparedImageRepository,
+            // Opened at boot; a device that is unplugged or not permitted is
+            // simply skipped and the VM starts without that one.
+            usbDeviceProvider = { config ->
+                usbPassthroughManager.openForPassthrough(config.usb.passthroughDevices)
+            },
         )
     }
 

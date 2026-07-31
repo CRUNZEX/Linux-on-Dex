@@ -10,6 +10,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -43,11 +44,12 @@ import com.crunzex.linuxondex.ui.components.StepperRow
 import com.crunzex.linuxondex.ui.components.SwitchRow
 import com.crunzex.linuxondex.ui.components.TextFieldRow
 import com.crunzex.linuxondex.ui.components.VerticalSpace
+import com.crunzex.linuxondex.usb.AttachedUsbDevice
 import com.crunzex.linuxondex.ui.main.MainUiState
 import com.crunzex.linuxondex.vm.BootOrder
 import com.crunzex.linuxondex.vm.CpuConfig
 import com.crunzex.linuxondex.vm.CpuModel
-import com.crunzex.linuxondex.vm.DiskCacheMode
+import com.crunzex.linuxondex.vm.DiskPerformance
 import com.crunzex.linuxondex.vm.DiskInterface
 import com.crunzex.linuxondex.vm.DisplayAdapter
 import com.crunzex.linuxondex.vm.EngineOverride
@@ -60,6 +62,8 @@ import com.crunzex.linuxondex.vm.PreparedImage
 import com.crunzex.linuxondex.vm.NetworkMode
 import com.crunzex.linuxondex.vm.ScreenResolution
 import com.crunzex.linuxondex.vm.StorageConfig
+import com.crunzex.linuxondex.vm.UsbConfig
+import com.crunzex.linuxondex.vm.VmBackup
 import com.crunzex.linuxondex.vm.VmConfig
 
 /** Which detail sections are expanded; advanced options stay folded away. */
@@ -92,6 +96,10 @@ fun SetupScreen(
     onApplyDesktopPreset: () -> Unit,
     onAddPortForward: (PortForwardRule) -> Unit,
     onRemovePortForward: (PortForwardRule) -> Unit,
+    onSetUsbPassthrough: (AttachedUsbDevice, Boolean) -> Unit,
+    onBackupVm: () -> Unit,
+    onDownloadBackup: (VmBackup) -> Unit,
+    onDeleteBackup: (VmBackup) -> Unit,
     /** Null in the two-pane layout, where the menu stays visible beside us. */
     onBack: (() -> Unit)?,
 ) {
@@ -243,6 +251,28 @@ fun SetupScreen(
             )
         }
 
+        item { SectionCaption("USB passthrough (Beta)") }
+        item {
+            UsbPassthroughGroup(
+                attachedDevices = uiState.attachedUsbDevices,
+                passedThrough = config.usb,
+                enabled = editable,
+                onSetPassthrough = onSetUsbPassthrough,
+            )
+        }
+
+        item { SectionCaption("Backup") }
+        item {
+            BackupGroup(
+                backups = uiState.backups,
+                isBackingUp = uiState.isBackingUp,
+                enabled = editable,
+                onBackupVm = onBackupVm,
+                onDownloadBackup = onDownloadBackup,
+                onDeleteBackup = onDeleteBackup,
+            )
+        }
+
         item { SectionCaption("Virtualization engine") }
         item {
             EngineGroup(
@@ -311,6 +341,107 @@ private fun PortForwardGroup(
     }
 }
 
+/**
+ * Hands plugged-in devices to the guest, one switch each.
+ *
+ * Every device switched on appears inside the VM as though it were plugged
+ * straight into it, from the moment the guest finishes booting. Any number
+ * can be on at once: each is handed over as its own open descriptor rather
+ * than competing for a single slot.
+ */
+@Composable
+private fun UsbPassthroughGroup(
+    attachedDevices: List<AttachedUsbDevice>,
+    passedThrough: UsbConfig,
+    enabled: Boolean,
+    onSetPassthrough: (AttachedUsbDevice, Boolean) -> Unit,
+) {
+    GroupCard {
+        if (attachedDevices.isEmpty()) {
+            ListRow(
+                title = "No USB devices connected",
+                subtitle = "Plug in a drive, webcam, network adapter or anything else",
+                value = "",
+            )
+            return@GroupCard
+        }
+        attachedDevices.forEachIndexed { index, device ->
+            if (index > 0) RowDivider()
+            SwitchRow(
+                title = device.name,
+                subtitle = "${device.kind.displayName} · ${device.idText}",
+                checked = passedThrough.isPassedThrough(device.idText),
+                enabled = enabled,
+                onCheckedChange = { turnOn -> onSetPassthrough(device, turnOn) },
+            )
+        }
+    }
+}
+
+/**
+ * Saved copies of the VM disk. Backing up needs the VM shut down: copying a
+ * disk the guest is writing to captures an image that may not boot.
+ */
+@Composable
+private fun BackupGroup(
+    backups: List<VmBackup>,
+    isBackingUp: Boolean,
+    enabled: Boolean,
+    onBackupVm: () -> Unit,
+    onDownloadBackup: (VmBackup) -> Unit,
+    onDeleteBackup: (VmBackup) -> Unit,
+) {
+    var pendingDelete by remember { mutableStateOf<VmBackup?>(null) }
+    GroupCard {
+        ListRow(
+            title = if (isBackingUp) "Backing up…" else "Back up this VM now",
+            subtitle = if (isBackingUp) {
+                "Writing a compacted copy; this can take a while"
+            } else {
+                "Saves a .qcow2 named with today's date and time"
+            },
+            enabled = enabled && !isBackingUp,
+            leading = { Icon(Icons.Filled.Add, null, tint = MaterialTheme.colorScheme.primary) },
+            modifier = Modifier.clickable(enabled = enabled && !isBackingUp, onClick = onBackupVm),
+        )
+        backups.forEach { backup ->
+            RowDivider()
+            ListRow(
+                title = backup.displayName,
+                subtitle = "${backup.sizeMb} MB",
+                trailing = {
+                    Row {
+                        IconButton(
+                            onClick = { onDownloadBackup(backup) },
+                            enabled = !isBackingUp,
+                        ) {
+                            Icon(
+                                Icons.Filled.Download,
+                                contentDescription = "Save ${backup.displayName} to Downloads",
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        IconButton(onClick = { pendingDelete = backup }) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Delete ${backup.displayName}",
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                },
+            )
+        }
+    }
+    pendingDelete?.let { backup ->
+        DeleteConfirmDialog(
+            itemName = backup.displayName,
+            onConfirm = { onDeleteBackup(backup); pendingDelete = null },
+            onDismiss = { pendingDelete = null },
+        )
+    }
+}
+
 /** Small dialog collecting a protocol + host/guest port for a new forward. */
 @Composable
 private fun PortForwardDialog(
@@ -320,12 +451,14 @@ private fun PortForwardDialog(
     var protocol by remember { mutableStateOf(PortProtocol.TCP) }
     var hostPortText by remember { mutableStateOf("8080") }
     var guestPortText by remember { mutableStateOf("80") }
+    var bindAllInterfaces by remember { mutableStateOf(false) }
 
     val rule = runCatching {
         PortForwardRule(
             protocol = protocol,
             hostPort = hostPortText.toInt(),
             guestPort = guestPortText.toInt(),
+            bindAllInterfaces = bindAllInterfaces,
         )
     }.getOrNull()
 
@@ -359,6 +492,16 @@ private fun PortForwardDialog(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.padding(top = 8.dp),
+                )
+                SwitchRow(
+                    title = "Reachable from other devices",
+                    subtitle = if (bindAllInterfaces) {
+                        "Binds 0.0.0.0 — anyone on this network can connect"
+                    } else {
+                        "Binds 127.0.0.1 — this phone only"
+                    },
+                    checked = bindAllInterfaces,
+                    onCheckedChange = { bindAllInterfaces = it },
                 )
                 if (rule == null) {
                     Text(
@@ -687,7 +830,7 @@ private fun StorageGroup(
         ExpanderRow(
             title = "Advanced storage",
             subtitle = "${config.storage.diskInterface.displayName} · " +
-                config.storage.cacheMode.displayName,
+                config.storage.performance.displayName,
             expanded = showAdvanced,
             enabled = enabled,
             onToggle = onToggleAdvanced,
@@ -709,16 +852,16 @@ private fun StorageGroup(
                 )
             }
             RowDivider()
-            SectionCaption("Write cache")
-            DiskCacheMode.entries.forEach { option ->
+            SectionCaption("Disk performance")
+            DiskPerformance.entries.forEach { option ->
                 ChoiceRow(
                     title = option.displayName,
                     subtitle = option.description,
-                    selected = config.storage.cacheMode == option,
+                    selected = config.storage.performance == option,
                     enabled = enabled,
                     onSelect = {
                         onUpdateConfig(
-                            config.copy(storage = config.storage.copy(cacheMode = option))
+                            config.copy(storage = config.storage.copy(performance = option))
                         )
                     },
                 )
@@ -855,7 +998,6 @@ private fun EngineGroup(
     GroupCard {
         ExpanderRow(
             title = "Engine selection",
-            subtitle = "Override the automatically chosen virtualization method",
             value = config.engineOverride.displayName,
             expanded = showChoices,
             enabled = enabled,

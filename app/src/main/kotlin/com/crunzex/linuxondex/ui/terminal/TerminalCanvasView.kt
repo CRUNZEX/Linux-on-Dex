@@ -19,6 +19,8 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.widget.OverScroller
 import com.crunzex.linuxondex.core.AppLog
+import com.crunzex.linuxondex.terminal.BlockGlyphs
+import com.crunzex.linuxondex.terminal.BrailleGlyphs
 import com.crunzex.linuxondex.terminal.TerminalCellFlags
 import com.crunzex.linuxondex.terminal.TerminalColors
 import com.crunzex.linuxondex.terminal.TerminalKeyEncoder
@@ -65,6 +67,10 @@ class TerminalCanvasView(context: Context) : View(context) {
         typeface = Typeface.MONOSPACE
     }
     private val backgroundPaint = Paint()
+    private val braillePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /** Bars must meet edge to edge, so this one deliberately does not smooth. */
+    private val blockPaint = Paint()
     private val cursorPaint = Paint().apply { color = TerminalColors.CURSOR }
     private val selectionPaint = Paint().apply { color = SELECTION_COLOR }
 
@@ -215,10 +221,14 @@ class TerminalCanvasView(context: Context) : View(context) {
 
         var column = 0
         while (column < columns) {
-            val colour = cellBackground(row.background[column], row.flags[column].toInt())
+            val colour = cellBackground(
+                row.foreground[column], row.background[column], row.flags[column].toInt()
+            )
             var runEnd = column + 1
             while (runEnd < columns &&
-                cellBackground(row.background[runEnd], row.flags[runEnd].toInt()) == colour
+                cellBackground(
+                    row.foreground[runEnd], row.background[runEnd], row.flags[runEnd].toInt()
+                ) == colour
             ) runEnd++
             if (colour != TerminalColors.DEFAULT_BACKGROUND) {
                 backgroundPaint.color = colour
@@ -244,17 +254,29 @@ class TerminalCanvasView(context: Context) : View(context) {
         while (column < columns) {
             val flags = row.flags[column].toInt()
             val colour = cellForeground(row.foreground[column], row.background[column], flags)
+            val invisible = flags and TerminalCellFlags.INVISIBLE != 0
+
+            // Bars and dots are drawn, not typed: they leave the text run so
+            // they land exactly inside their own cell, at the exact size the
+            // program meant, instead of wherever the font decides.
+            if (isDrawnGeometrically(row.chars[column])) {
+                if (!invisible) drawGeometricCell(canvas, row.chars[column], column, top, colour)
+                column++
+                continue
+            }
+
             var length = 0
             var runEnd = column
             while (runEnd < columns) {
                 val runFlags = row.flags[runEnd].toInt()
                 if (runFlags != flags ||
-                    cellForeground(row.foreground[runEnd], row.background[runEnd], runFlags) != colour
+                    cellForeground(row.foreground[runEnd], row.background[runEnd], runFlags) != colour ||
+                    isDrawnGeometrically(row.chars[runEnd])
                 ) break
                 runBuffer[length++] = row.chars[runEnd]
                 runEnd++
             }
-            if (flags and TerminalCellFlags.INVISIBLE == 0 && hasInk(runBuffer, length)) {
+            if (!invisible && hasInk(runBuffer, length)) {
                 styleTextPaint(colour, flags)
                 canvas.drawText(
                     runBuffer, 0, length,
@@ -264,6 +286,75 @@ class TerminalCanvasView(context: Context) : View(context) {
                 )
             }
             column = runEnd
+        }
+    }
+
+    private fun isDrawnGeometrically(character: Char): Boolean =
+        BrailleGlyphs.isBraillePattern(character) || BlockGlyphs.fillFor(character) != null
+
+    /** Dispatches to whichever shape this character actually is. */
+    private fun drawGeometricCell(
+        canvas: Canvas,
+        character: Char,
+        column: Int,
+        top: Float,
+        colour: Int,
+    ) {
+        val fill = BlockGlyphs.fillFor(character)
+        if (fill != null) {
+            drawBlockCell(canvas, fill, column, top, colour)
+        } else {
+            drawBrailleCell(canvas, character, column, top, colour)
+        }
+    }
+
+    /** A block element as the rectangle it stands for. */
+    private fun drawBlockCell(
+        canvas: Canvas,
+        fill: BlockGlyphs.CellFill,
+        column: Int,
+        top: Float,
+        colour: Int,
+    ) {
+        val left = PADDING_PX + column * cellWidth
+        blockPaint.color = colour
+        blockPaint.alpha = fill.alpha
+        canvas.drawRect(
+            left + fill.left * cellWidth,
+            top + fill.top * cellHeight,
+            left + fill.right * cellWidth,
+            top + fill.bottom * cellHeight,
+            blockPaint,
+        )
+    }
+
+    /**
+     * One braille character as up to eight dots on a 2×4 grid inside the
+     * cell, the way a terminal font would lay them out.
+     */
+    private fun drawBrailleCell(
+        canvas: Canvas,
+        character: Char,
+        column: Int,
+        top: Float,
+        colour: Int,
+    ) {
+        val dotWidth = cellWidth / BrailleGlyphs.DOT_COLUMNS
+        val dotHeight = cellHeight.toFloat() / BrailleGlyphs.DOT_ROWS
+        val radius = minOf(dotWidth, dotHeight) * BRAILLE_DOT_SCALE
+        val left = PADDING_PX + column * cellWidth
+        braillePaint.color = colour
+
+        for (dotRow in 0 until BrailleGlyphs.DOT_ROWS) {
+            for (dotColumn in 0 until BrailleGlyphs.DOT_COLUMNS) {
+                if (!BrailleGlyphs.hasDot(character, dotColumn, dotRow)) continue
+                canvas.drawCircle(
+                    left + (dotColumn + 0.5f) * dotWidth,
+                    top + (dotRow + 0.5f) * dotHeight,
+                    radius,
+                    braillePaint,
+                )
+            }
         }
     }
 
@@ -306,12 +397,15 @@ class TerminalCanvasView(context: Context) : View(context) {
         return false
     }
 
+    // Inverse video swaps the cell's own two colours. Substituting a fixed
+    // colour for either half — as the background used to — turns every
+    // inverted cell the same shade, which is how a coloured header or a
+    // selected row in btop lost its colour.
     private fun cellForeground(foreground: Int, background: Int, flags: Int): Int =
         if (flags and TerminalCellFlags.INVERSE != 0) background else foreground
 
-    private fun cellBackground(background: Int, flags: Int): Int =
-        if (flags and TerminalCellFlags.INVERSE != 0) TerminalColors.DEFAULT_FOREGROUND
-        else background
+    private fun cellBackground(foreground: Int, background: Int, flags: Int): Int =
+        if (flags and TerminalCellFlags.INVERSE != 0) foreground else background
 
     private fun styleTextPaint(colour: Int, flags: Int) {
         textPaint.color = colour
@@ -878,6 +972,14 @@ class TerminalCanvasView(context: Context) : View(context) {
         private const val PADDING_PX = 8f
         private const val FAINT_ALPHA = 160
         private const val ITALIC_SKEW = -0.25f
+
+        /**
+         * Braille dot radius as a fraction of its sub-cell. Around a third
+         * reads as a dot rather than a filled square, and neighbouring dots
+         * stay separate — which is the whole point of using braille to draw
+         * a graph.
+         */
+        private const val BRAILLE_DOT_SCALE = 0.34f
         private const val CURSOR_OUTLINE_WIDTH = 2f
         private const val WHEEL_ROWS_PER_NOTCH = 3
         private const val BACKSPACE_BYTE: Byte = 0x7F

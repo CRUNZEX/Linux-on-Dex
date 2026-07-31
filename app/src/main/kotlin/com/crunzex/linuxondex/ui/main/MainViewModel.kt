@@ -26,6 +26,10 @@ import com.crunzex.linuxondex.vm.PreparedImage
 import com.crunzex.linuxondex.vm.ScreenResolution
 import com.crunzex.linuxondex.usb.AttachedUsbDevice
 import com.crunzex.linuxondex.vm.VmConfig
+import com.crunzex.linuxondex.about.UpdateNotice
+import com.crunzex.linuxondex.about.UpdateStatus
+import com.crunzex.linuxondex.vm.UsbDeviceSpec
+import com.crunzex.linuxondex.vm.VmBackup
 import com.crunzex.linuxondex.vm.VmState
 
 data class MainUiState(
@@ -52,6 +56,15 @@ data class MainUiState(
     val resourceHistory: List<VmResourceUsage> = emptyList(),
     /** USB devices plugged into the phone — a read-only monitor list. */
     val attachedUsbDevices: List<AttachedUsbDevice> = emptyList(),
+    /** Saved copies of the VM disk, newest first. */
+    val backups: List<VmBackup> = emptyList(),
+    /** True while a backup is being written. */
+    val isBackingUp: Boolean = false,
+    /**
+     * True when a newer release exists that the user has not looked at yet.
+     * Drives the One UI "new" dot on the overflow menu.
+     */
+    val hasUnseenUpdate: Boolean = false,
 )
 
 /**
@@ -71,6 +84,37 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         observeVmState()
         observeResourceUsage()
         refresh()
+        checkForNewerRelease()
+    }
+
+    /**
+     * Asks GitHub, once per app start, whether a newer release is published.
+     * Entirely optional: any failure simply leaves the dot hidden.
+     */
+    private fun checkForNewerRelease() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val status = runCatching { container.aboutRepository.checkForUpdate() }
+                .getOrDefault(UpdateStatus.Latest)
+            val unseen = UpdateNotice.shouldShowUpdateDot(
+                updateStatus = status,
+                lastSeenVersion = container.updateNotice.lastSeenVersion(),
+            )
+            _uiState.update { it.copy(hasUnseenUpdate = unseen) }
+        }
+    }
+
+    /**
+     * The user opened About, so they have now seen whatever is published:
+     * remember it and clear the dot.
+     */
+    fun markUpdateSeen() {
+        if (!_uiState.value.hasUnseenUpdate) return
+        _uiState.update { it.copy(hasUnseenUpdate = false) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val status = runCatching { container.aboutRepository.checkForUpdate() }
+                .getOrNull() as? UpdateStatus.Available ?: return@launch
+            container.updateNotice.markSeen(status.version)
+        }
     }
 
     /**
@@ -140,6 +184,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                             config.validationProblems(capabilities.totalRamMb),
                         preparedImages = container.vmController.listPreparedImages(),
                         attachedUsbDevices = container.usbDeviceMonitor.attachedDevices(),
+                        backups = container.vmBackupManager.listBackups(),
                     )
                 }
             } catch (error: Exception) {
@@ -339,6 +384,87 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
+    /**
+     * Switches one USB device on or off for the guest; any number may be on
+     * at the same time.
+     *
+     * Android's permission dialog is requested here rather than at boot: a
+     * prompt appearing as the VM starts would be missed, and the boot would
+     * silently continue without the device.
+     */
+    fun setUsbPassthroughDevice(device: AttachedUsbDevice, passedThrough: Boolean) {
+        val spec = UsbDeviceSpec(
+            vendorId = device.vendorId,
+            productId = device.productId,
+            label = device.name,
+        )
+        if (passedThrough) {
+            container.usbPassthroughManager.requestPermission(spec)
+        }
+        updateConfig { config ->
+            config.copy(usb = config.usb.withDevice(spec, passedThrough))
+        }
+    }
+
+    /**
+     * Writes a timestamped copy of the VM disk. Only while the VM is off:
+     * copying a disk the guest is writing to captures a torn image.
+     */
+    fun backupVm() {
+        if (_uiState.value.isBackingUp) return
+        val state = _uiState.value
+        if (state.vmState.isRunning || state.vmState.isBusy) {
+            _uiState.update { it.copy(userMessage = "Shut the virtual machine down first") }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(isBackingUp = true) }
+            try {
+                val config = container.vmController.loadPrimaryConfig()
+                val backup = container.vmBackupManager.createBackup(config)
+                postMessage("Saved ${backup.displayName} (${backup.sizeMb} MB)")
+                refresh()
+            } catch (error: Exception) {
+                AppLog.error(SCOPE, "backup failed", error)
+                postMessage(describe(error))
+            } finally {
+                _uiState.update { it.copy(isBackingUp = false) }
+            }
+        }
+    }
+
+    /**
+     * Copies a saved backup into the phone's Downloads folder, where a file
+     * manager or a USB cable can pick it up.
+     */
+    fun downloadBackup(backup: VmBackup) {
+        if (_uiState.value.isBackingUp) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update { it.copy(isBackingUp = true) }
+            try {
+                val name = container.vmBackupManager.exportToDownloads(backup)
+                postMessage("Saved $name to Downloads")
+            } catch (error: Exception) {
+                AppLog.error(SCOPE, "download failed", error)
+                postMessage(describe(error))
+            } finally {
+                _uiState.update { it.copy(isBackingUp = false) }
+            }
+        }
+    }
+
+    fun deleteBackup(backup: VmBackup) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                container.vmBackupManager.delete(backup)
+                refresh()
+            } catch (error: Exception) {
+                AppLog.error(SCOPE, "deleting a backup failed", error)
+                postMessage(describe(error))
+            }
+        }
+    }
+
     fun applyDesktopPreset() = updateConfig { config ->
         val deviceRamMb = _uiState.value.capabilities?.totalRamMb ?: 0
         val targetMemoryMb = if (deviceRamMb > 0) {
@@ -368,6 +494,19 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             // desktop feels comfortable.
             display = config.display.copy(resolution = ScreenResolution.HD_1024_600),
         )
+    }
+
+    /** Writes the recent log to Downloads so it can be shared. */
+    fun exportDiagnosticsLog() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val fileName = container.logExporter.exportRecentLog()
+                postMessage("Saved $fileName to Downloads")
+            } catch (error: Exception) {
+                AppLog.error(SCOPE, "log export failed", error)
+                postMessage(describe(error))
+            }
+        }
     }
 
     fun clearMessage() {

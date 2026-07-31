@@ -1,5 +1,6 @@
 package com.crunzex.linuxondex.ui.diagnostics
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -8,6 +9,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,6 +42,7 @@ import com.crunzex.linuxondex.ui.theme.OneUiPalette
 @Composable
 fun DiagnosticsScreen(
     uiState: MainUiState,
+    onExportLog: () -> Unit,
     /** Null in the two-pane layout, where the menu stays visible beside us. */
     onBack: (() -> Unit)?,
 ) {
@@ -69,7 +72,7 @@ fun DiagnosticsScreen(
             item { SectionCaption("Engines (preferred first)") }
             item { EnginesGroup(uiState) }
             item { SectionCaption("Recent app log") }
-            item { LogCard() }
+            item { LogCard(onExportLog = onExportLog) }
             item { VerticalSpace(28) }
         }
     }
@@ -173,8 +176,15 @@ private fun EnginesGroup(uiState: MainUiState) {
 }
 
 @Composable
-private fun LogCard() {
+private fun LogCard(onExportLog: () -> Unit) {
     GroupCard {
+        ListRow(
+            title = "Save log to Downloads",
+            subtitle = "A .log file you can send on, named with the date and time",
+            trailing = { Icon(Icons.Filled.Download, contentDescription = null) },
+            modifier = Modifier.clickable(onClick = onExportLog),
+        )
+        RowDivider()
         Text(
             text = AppLog.recentLines().takeLast(40).joinToString("\n").ifEmpty { "(empty)" },
             fontFamily = FontFamily.Monospace,

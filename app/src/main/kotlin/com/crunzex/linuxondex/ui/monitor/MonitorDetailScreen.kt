@@ -365,8 +365,10 @@ private fun TemperatureCard() {
 }
 
 /**
- * What is plugged into the USB port right now — strictly view-only. Nothing
- * is ever attached to or detached from the virtual machine.
+ * What is plugged into the USB port right now.
+ *
+ * A plain list: handing a device to the guest is a configuration choice and
+ * lives in the virtual machine's own settings, not here.
  */
 @Composable
 private fun UsbDevicesCard(devices: List<AttachedUsbDevice>) {
@@ -387,12 +389,6 @@ private fun UsbDevicesCard(devices: List<AttachedUsbDevice>) {
                 if (index < devices.lastIndex) RowDivider()
             }
         }
-        RowDivider()
-        ListRow(
-            title = "View only",
-            subtitle = "Devices stay connected to Android; nothing is attached to the VM",
-            value = "",
-        )
     }
 }
 

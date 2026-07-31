@@ -34,6 +34,8 @@ object OneUiPalette {
     val DarkTextSecondary = Color(0xFF9C9CA3)
     val SuccessGreen = Color(0xFF1AA260)
     val WarningOrange = Color(0xFFF5891D)
+    /** One UI's "something is new here" dot. */
+    val BadgeOrange = Color(0xFFFF6C00)
     val ErrorRed = Color(0xFFE2442F)
 }
 

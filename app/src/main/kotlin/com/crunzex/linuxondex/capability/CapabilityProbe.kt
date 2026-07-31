@@ -106,8 +106,10 @@ class CapabilityProbe(private val context: Context) {
      * signal that survives current One UI versions.
      */
     private fun probeDexMode(): Boolean = try {
-        val uiMode = context.resources.configuration.uiMode
-        (uiMode and Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_DESK
+        // Best effort only: this runs on the application context, which does
+        // not track the DeX display. The UI asks [DexEnvironment] again per
+        // window, which is the answer users actually see.
+        DexEnvironment.isDesktopMode(context.resources.configuration, context)
     } catch (error: Exception) {
         false
     }

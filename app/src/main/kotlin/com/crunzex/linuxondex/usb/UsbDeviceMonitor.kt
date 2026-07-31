@@ -58,13 +58,12 @@ data class AttachedUsbDevice(
 }
 
 /**
- * Read-only view of what is plugged into the phone's USB port, shown on the
- * Monitor screen.
+ * What is plugged into the phone's USB port right now.
  *
- * This deliberately replaces the earlier passthrough/mount features: nothing
- * is ever attached to or detached from the virtual machine, so no USB device
- * can affect whether the VM boots. Every probe is defensive — a missing
- * service or an unreadable device yields an empty list, never an exception.
+ * Purely a list: it reports devices, it never claims one. Handing a device
+ * to the guest is a separate, deliberate choice made in the virtual
+ * machine's own settings. Every probe here is defensive — a missing service
+ * or an unreadable device yields an empty list, never an exception.
  */
 class UsbDeviceMonitor(context: Context) {
 

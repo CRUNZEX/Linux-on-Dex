@@ -122,6 +122,21 @@ object CloudInitSeedBuilder {
           # Serial lines cannot deliver SIGWINCH; this asks the terminal for
           # its size (cursor-position report) at login, and by hand via
           # `fix_console` after a resize or font change.
+          # Colour lives in its own file, sorted early on purpose:
+          # /etc/profile sources profile.d in glob order, and a `return`
+          # inside any one of those scripts ends the *whole* loop —
+          # cloud-init's own locale script does exactly that, so anything
+          # sorted after it never ran. That is why a serial login kept
+          # TERM=dumb and every program turned colour off, while `sudo`,
+          # which builds its own environment, looked fine.
+          - path: /etc/profile.d/10-linux-on-dex-colour.sh
+            permissions: "0644"
+            content: |
+              case "${'$'}{TERM:-}" in
+                  ""|dumb|unknown|vt100|vt102|vt220|linux) TERM=xterm-256color ;;
+              esac
+              export TERM
+              export COLORTERM=truecolor
           - path: /etc/profile.d/98-linux-on-dex-console.sh
             permissions: "0644"
             content: |

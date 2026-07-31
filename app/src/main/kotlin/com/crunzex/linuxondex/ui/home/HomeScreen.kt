@@ -1,5 +1,6 @@
 package com.crunzex.linuxondex.ui.home
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Album
@@ -86,7 +88,11 @@ fun HomeScreen(
         title = "Linux on DeX",
         subtitle = "Full Linux virtual machine on your Galaxy",
         actions = {
-            OverflowMenu(onOpenSetup = onOpenSetup, onOpenAbout = onOpenAbout)
+            OverflowMenu(
+                hasUnseenUpdate = uiState.hasUnseenUpdate,
+                onOpenSetup = onOpenSetup,
+                onOpenAbout = onOpenAbout,
+            )
         },
         bottomBar = {
             OneUiBottomBar {
@@ -149,12 +155,25 @@ fun HomeScreen(
  * 8.5 puts a screen's actions once there is more than one.
  */
 @Composable
-private fun OverflowMenu(onOpenSetup: () -> Unit, onOpenAbout: () -> Unit) {
+private fun OverflowMenu(
+    hasUnseenUpdate: Boolean,
+    onOpenSetup: () -> Unit,
+    onOpenAbout: () -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
 
     Box {
         IconButton(onClick = { expanded = true }) {
             Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+        }
+        // One UI marks the menu itself, then the entry inside it, so the
+        // user can follow the dot to whatever is new.
+        if (hasUnseenUpdate) {
+            UpdateDot(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = MENU_DOT_INSET_DP.dp, end = MENU_DOT_INSET_DP.dp)
+            )
         }
         DropdownMenu(
             expanded = expanded,
@@ -167,7 +186,7 @@ private fun OverflowMenu(onOpenSetup: () -> Unit, onOpenAbout: () -> Unit) {
                 expanded = false
                 onOpenSetup()
             }
-            OverflowMenuItem(text = "About this app") {
+            OverflowMenuItem(text = "About this app", showUpdateDot = hasUnseenUpdate) {
                 expanded = false
                 onOpenAbout()
             }
@@ -176,17 +195,41 @@ private fun OverflowMenu(onOpenSetup: () -> Unit, onOpenAbout: () -> Unit) {
 }
 
 @Composable
-private fun OverflowMenuItem(text: String, onClick: () -> Unit) {
+private fun OverflowMenuItem(
+    text: String,
+    showUpdateDot: Boolean = false,
+    onClick: () -> Unit,
+) {
     DropdownMenuItem(
         text = {
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                if (showUpdateDot) {
+                    Spacer(Modifier.width(8.dp))
+                    UpdateDot()
+                }
+            }
         },
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+    )
+}
+
+/**
+ * One UI's "new" marker: a small solid orange circle, no number. Purely
+ * decorative, so it carries no content description — the row it sits on
+ * already says what it refers to.
+ */
+@Composable
+private fun UpdateDot(modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .size(UPDATE_DOT_SIZE_DP.dp)
+            .background(OneUiPalette.BadgeOrange, CircleShape)
     )
 }
 
@@ -488,3 +531,9 @@ private fun VmState.describe(engine: EngineKind?): String = when (this) {
 }
 
 private const val MESSAGE_VISIBLE_MILLIS = 4_000L
+
+/** Diameter of the One UI "new" dot. */
+private const val UPDATE_DOT_SIZE_DP = 7
+
+/** Keeps the dot on the icon's corner rather than the ripple's edge. */
+private const val MENU_DOT_INSET_DP = 12

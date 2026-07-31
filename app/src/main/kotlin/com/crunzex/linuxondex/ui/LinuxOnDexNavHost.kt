@@ -165,7 +165,10 @@ private fun TwoPaneLayout(
                 onOpenDisplay = { onNavigate(Destination.DISPLAY) },
                 onOpenDiagnostics = { onNavigate(Destination.DIAGNOSTICS) },
                 onOpenMonitor = { onNavigate(Destination.MONITOR) },
-                onOpenAbout = { onNavigate(Destination.ABOUT) },
+                onOpenAbout = {
+                    mainViewModel.markUpdateSeen()
+                    onNavigate(Destination.ABOUT)
+                },
                 onMessageShown = mainViewModel::clearMessage,
             )
         }
@@ -228,7 +231,10 @@ private fun DestinationPane(
             onOpenDisplay = { onNavigate(Destination.DISPLAY) },
             onOpenDiagnostics = { onNavigate(Destination.DIAGNOSTICS) },
             onOpenMonitor = { onNavigate(Destination.MONITOR) },
-            onOpenAbout = { onNavigate(Destination.ABOUT) },
+            onOpenAbout = {
+                mainViewModel.markUpdateSeen()
+                onNavigate(Destination.ABOUT)
+            },
             onMessageShown = mainViewModel::clearMessage,
         )
 
@@ -245,6 +251,10 @@ private fun DestinationPane(
             onApplyDesktopPreset = mainViewModel::applyDesktopPreset,
             onAddPortForward = mainViewModel::addPortForward,
             onRemovePortForward = mainViewModel::removePortForward,
+            onSetUsbPassthrough = mainViewModel::setUsbPassthroughDevice,
+            onBackupVm = mainViewModel::backupVm,
+            onDownloadBackup = mainViewModel::downloadBackup,
+            onDeleteBackup = mainViewModel::deleteBackup,
             onBack = onBack,
         )
 
@@ -276,6 +286,7 @@ private fun DestinationPane(
 
         Destination.DIAGNOSTICS -> DiagnosticsScreen(
             uiState = uiState,
+            onExportLog = mainViewModel::exportDiagnosticsLog,
             onBack = onBack,
         )
 

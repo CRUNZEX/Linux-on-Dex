@@ -8,12 +8,15 @@ import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.core.LxdError
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileDescriptor
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 
@@ -92,6 +95,63 @@ class QmpClient private constructor(
     /** Removes a live forward; identified by protocol and host binding. */
     fun removePortForward(protocol: String, hostPort: Int) {
         humanMonitorCommand("hostfwd_remove net0 $protocol:127.0.0.1:$hostPort")
+    }
+
+    /**
+     * Gives QEMU one of this process's open file descriptors and returns the
+     * id of the fd set it was filed under.
+     *
+     * The descriptor itself travels as ancillary data on this very socket —
+     * the kernel duplicates it into QEMU, which is the only way to hand a
+     * device to a process that could never open it itself. Android exposes
+     * that as [LocalSocket.setFileDescriptorsForSend], which attaches the
+     * descriptors to the *next* write, so the command below carries it.
+     *
+     * The fd set outlives this connection, so the caller may disconnect
+     * once the device that uses it has been added.
+     */
+    fun addFileDescriptorToNewSet(fileDescriptor: FileDescriptor): Int {
+        socket.setFileDescriptorsForSend(arrayOf(fileDescriptor))
+        val reply = try {
+            execute("add-fd")
+        } finally {
+            // Never leave it armed: the next unrelated command would send
+            // the descriptor a second time.
+            socket.setFileDescriptorsForSend(null)
+        }
+        return reply["return"]?.jsonObject?.get("fdset-id")?.jsonPrimitive?.int
+            ?: throw LxdError.ControlChannelFailed("add-fd returned no fdset id")
+    }
+
+    /**
+     * Plugs a host USB device into the running guest, reading it from the
+     * descriptor already filed under [fdSetId].
+     *
+     * `hostdevice` is deliberate: telling QEMU to go and *find* the device by
+     * vendor and product id makes it enumerate `/dev/bus/usb`, which an
+     * Android app is not allowed to read, so it finds nothing and attaches
+     * nothing. Naming the descriptor skips the search entirely.
+     */
+    fun attachUsbHostDevice(deviceId: String, fdSetId: Int) {
+        execute("device_add") {
+            put("driver", "usb-host")
+            put("id", deviceId)
+            put("hostdevice", "/dev/fdset/$fdSetId")
+        }
+    }
+
+    /** Unplugs a device added by [attachUsbHostDevice]. */
+    fun detachDevice(deviceId: String) {
+        execute("device_del") {
+            put("id", deviceId)
+        }
+    }
+
+    /** Releases an fd set once nothing is using it any more. */
+    fun removeFileDescriptorSet(fdSetId: Int) {
+        execute("remove-fd") {
+            put("fdset-id", fdSetId)
+        }
     }
 
     /**

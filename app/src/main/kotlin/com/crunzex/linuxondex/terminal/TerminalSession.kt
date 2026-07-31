@@ -128,7 +128,7 @@ class TerminalSession(
      * line by line.
      */
     fun paste(text: String) {
-        val bytes = text.toByteArray(Charsets.UTF_8)
+        val bytes = normalizePastedLineEndings(text).toByteArray(Charsets.UTF_8)
         if (screen.bracketedPaste) {
             sendBytes(BRACKETED_PASTE_START + bytes + BRACKETED_PASTE_END)
         } else {
@@ -136,7 +136,16 @@ class TerminalSession(
         }
     }
 
-    /** The view measured itself: [columns]×[rows] cells now fit. */
+    /**
+     * The view measured itself: [columns]×[rows] cells now fit.
+     *
+     * Nothing is sent to the guest. The guest learns the new size by asking
+     * for it — our images query the terminal before every prompt, and the
+     * parser answers that query invisibly — because typing a command into
+     * whatever happens to be running is not safe: at a boot menu, in an
+     * installer or in any full-screen program, those keystrokes are input,
+     * and they corrupted the screen.
+     */
     fun resize(columns: Int, rows: Int) {
         viewSizeKnown = true
         screen.resize(columns, rows)
@@ -144,20 +153,17 @@ class TerminalSession(
     }
 
     /**
-     * Tells the guest this terminal's real size by typing a `stty` command
-     * at its shell.
+     * Tells the guest this terminal's size by typing a `stty` command at its
+     * shell — the manual fallback behind the toolbar button.
      *
      * A serial console cannot deliver the resize signal a local terminal
-     * would, so after this window is resized (a DeX drag, a font change) a
-     * guest keeps drawing for the old geometry — full-screen programs like
-     * `top` and apt's progress bar visibly fall apart. Our guest images
-     * re-sync themselves before every prompt; this action is the universal
-     * fallback that works on *any* Linux guest.
+     * would, and a guest that never asks for the size keeps drawing for the
+     * old geometry. This works on *any* Linux guest, but it is deliberately
+     * something the user asks for: the bytes are keystrokes, so they belong
+     * at an idle shell prompt and nowhere else.
      *
      * The line is prefixed with kill-line so anything half-typed at the
-     * prompt is cleared instead of corrupting the command. It must be used
-     * at an idle shell prompt: a full-screen program would read the text as
-     * keystrokes (exactly as if the user typed it).
+     * prompt is cleared instead of corrupting the command.
      */
     fun syncGuestSizeToScreen() {
         sendBytes(buildSttySizeCommand(screen.rows, screen.columns))
@@ -264,6 +270,19 @@ class TerminalSession(
         const val PRIMARY_CONSOLE_INDEX = 0
         const val DEFAULT_COLUMNS = 80
         const val DEFAULT_ROWS = 24
+
+        /**
+         * Rewrites the line breaks in pasted text the way a terminal sends
+         * them: one carriage return per line, never a bare line feed.
+         *
+         * This is what the Enter key sends, and the guest's tty turns it
+         * back into a newline. Sending a bare line feed instead moves the
+         * cursor *down without returning to column one*, so a multi-line
+         * paste marches diagonally across the screen and overwrites itself —
+         * very visible on a narrow phone window, where more lines wrap.
+         */
+        fun normalizePastedLineEndings(text: String): String =
+            text.replace("\r\n", "\r").replace('\n', '\r')
 
         /** Bash kill-line: clears any half-typed input before our command. */
         private const val KILL_LINE = 0x15.toByte()

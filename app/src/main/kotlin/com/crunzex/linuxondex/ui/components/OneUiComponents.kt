@@ -267,6 +267,11 @@ fun ChoiceRow(
 /**
  * Row that folds a detail section open and closed, with One UI's rotating
  * chevron. Pair it with [AnimatedExpand] holding the folded content.
+ *
+ * The current [value] becomes the row's summary line rather than a column of
+ * its own. One UI presents a picker this way, and on a phone it is the only
+ * layout that works: a trailing value and a description compete for the same
+ * width, and both end up wrapped to one word per line.
  */
 @Composable
 fun ExpanderRow(
@@ -285,8 +290,7 @@ fun ExpanderRow(
     )
     ListRow(
         title = title,
-        subtitle = subtitle,
-        value = value,
+        subtitle = summaryLine(value, subtitle),
         enabled = enabled,
         modifier = modifier.clickable(enabled = enabled, onClick = onToggle),
         trailing = {
@@ -322,6 +326,15 @@ fun AnimatedExpand(
 }
 
 private const val CHEVRON_EXPANDED_DEGREES = 180f
+
+/**
+ * The summary under an [ExpanderRow]'s title: the current choice first, then
+ * whatever explains it, each on its own line. Null when there is neither.
+ */
+internal fun summaryLine(value: String?, subtitle: String?): String? =
+    listOfNotNull(value?.takeIf { it.isNotBlank() }, subtitle?.takeIf { it.isNotBlank() })
+        .joinToString("\n")
+        .takeIf { it.isNotEmpty() }
 
 /** Row whose value is adjusted with − / + buttons. */
 @Composable

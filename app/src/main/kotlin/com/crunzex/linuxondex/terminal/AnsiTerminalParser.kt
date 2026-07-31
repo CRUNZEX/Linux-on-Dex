@@ -287,8 +287,28 @@ class AnsiTerminalParser(
                 screen.setScrollRegion(parameter(0, 1) - 1, parameter(1, screen.rows) - 1)
             }
             's' -> screen.saveCursor()
+            't' -> respondToWindowRequest()
             'u' -> screen.restoreCursor()
-            else -> Unit // window ops ('t'), cursor styles ('q'), … — ignored
+            else -> Unit // cursor styles ('q'), … — ignored
+        }
+    }
+
+    /**
+     * Window manipulation. Only the size reports are answered — the rest
+     * (move, resize, iconify) ask a terminal to change itself, which is not
+     * something a guest gets to decide here.
+     *
+     * Answering matters: this is how a guest learns the terminal's size
+     * without anything being typed into it. `resize`, ncurses and the
+     * images' own console helper all ask this way, so the size stays right
+     * after a rotation or a window drag with nothing visible on screen.
+     */
+    private fun respondToWindowRequest() {
+        when (parameters.getOrElse(0) { 0 }) {
+            REPORT_TEXT_AREA_IN_CHARS ->
+                respond("[8;${screen.rows};${screen.columns}t".toByteArray())
+            REPORT_SCREEN_SIZE_IN_CHARS ->
+                respond("[9;${screen.rows};${screen.columns}t".toByteArray())
         }
     }
 
@@ -348,6 +368,26 @@ class AnsiTerminalParser(
         }
     }
 
+    /**
+     * How many parameters starting at [index] belong to one code.
+     *
+     * Colon-joined values are sub-parameters of the code they follow
+     * (`4:3` is one curly underline, not an underline *and* an italic).
+     * Counting them keeps an unrecognised code from spilling its
+     * sub-parameters into the next one, where they would be read as
+     * attributes of their own and leave colours set that were never asked
+     * for.
+     */
+    private fun subParameterRun(index: Int): Int {
+        var length = 1
+        while (index + length < parameters.size &&
+            parameterHasColon.getOrElse(index + length) { false }
+        ) {
+            length++
+        }
+        return length
+    }
+
     /** Applies the code at [index]; returns how many parameters it used. */
     private fun applySgrCode(index: Int): Int {
         val pen = screen.pen
@@ -376,25 +416,33 @@ class AnsiTerminalParser(
             49 -> pen.background = TerminalColors.DEFAULT_BACKGROUND
             in 90..97 -> pen.foreground = TerminalColors.indexed(code - 90 + 8)
             in 100..107 -> pen.background = TerminalColors.indexed(code - 100 + 8)
-            else -> Unit // blink and rarities — ignored
+            // Blink, underline colour (58/59), fonts and other rarities:
+            // ignored, but their sub-parameters must still be stepped over.
+            else -> return subParameterRun(index)
         }
         return 1
     }
 
     /**
-     * SGR 38/48 extensions: `5;index` or `2;r;g;b`. The colon form may carry
-     * an empty colour-space id (`38:2::r:g:b`), which arrives as a zero
-     * parameter that has to be skipped.
+     * SGR 38/48 extensions: `5;index` for a palette entry, `2;r;g;b` for a
+     * true colour.
+     *
+     * Both come in a semicolon form and a colon form, and the colon form may
+     * carry an empty colour-space id (`38:2::r:g:b`). The colon form is one
+     * parameter group, so its length is known; the semicolon form is not, so
+     * its arguments are counted by hand.
      */
     private fun applyExtendedColour(index: Int, apply: (Int) -> Unit): Int {
+        val colonForm = parameterHasColon.getOrElse(index + 1) { false }
+        val groupLength = if (colonForm) subParameterRun(index) else 0
         when (parameters.getOrNull(index + 1)) {
             5 -> {
                 apply(TerminalColors.indexed(parameters.getOrElse(index + 2) { 0 }))
-                return 2
+                return if (colonForm) groupLength - 1 else 2
             }
             2 -> {
-                val colonForm = parameterHasColon.getOrElse(index + 1) { false }
-                val hasColourSpaceId = colonForm && index + 5 < parameters.size
+                // Colon form with a colour-space id: 38 : 2 : id : r : g : b.
+                val hasColourSpaceId = colonForm && groupLength >= COLON_RGB_WITH_SPACE_ID
                 val first = if (hasColourSpaceId) index + 3 else index + 2
                 apply(
                     TerminalColors.rgb(
@@ -403,9 +451,9 @@ class AnsiTerminalParser(
                         parameters.getOrElse(first + 2) { 0 },
                     )
                 )
-                return if (hasColourSpaceId) 5 else 4
+                return if (colonForm) groupLength - 1 else 4
             }
-            else -> return 1
+            else -> return if (colonForm) groupLength - 1 else 1
         }
     }
 
@@ -460,6 +508,15 @@ class AnsiTerminalParser(
         private const val MAX_PARAMETER = 65_535
         private const val MAX_OSC_LENGTH = 1_024
         private const val MODE_INSERT = 4
+
+        /** CSI 18 t — "how many characters fit in the text area?" */
+        private const val REPORT_TEXT_AREA_IN_CHARS = 18
+
+        /** CSI 19 t — the same question about the whole screen. */
+        private const val REPORT_SCREEN_SIZE_IN_CHARS = 19
+
+        /** `38 : 2 : id : r : g : b` — six values, versus five without the id. */
+        private const val COLON_RGB_WITH_SPACE_ID = 6
 
         private val DEVICE_ATTRIBUTES_REPLY = "[?6c".toByteArray()
         private val SECONDARY_ATTRIBUTES_REPLY = "[>0;0;0c".toByteArray()

@@ -158,7 +158,9 @@ class AboutRepository(private val context: Context) {
 
         /** The developer's GitHub handle; the profile and repo both hang off it. */
         const val DEVELOPER_LOGIN = "CRUNZEX"
-        const val PROJECT_REPOSITORY = "linux-on-dex"
+        // The canonical repository name; GitHub is case-insensitive on
+        // redirects, but the API and the links should use the real one.
+        const val PROJECT_REPOSITORY = "Linux-on-Dex"
 
         const val PROFILE_PAGE_URL = "https://github.com/$DEVELOPER_LOGIN"
         const val REPOSITORY_PAGE_URL = "$PROFILE_PAGE_URL/$PROJECT_REPOSITORY"

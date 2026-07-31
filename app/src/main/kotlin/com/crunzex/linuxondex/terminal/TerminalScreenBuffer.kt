@@ -471,18 +471,43 @@ class TerminalScreenBuffer(
         val targetRows = newRows.coerceAtLeast(MIN_ROWS)
         if (targetColumns == columns && targetRows == rows) return
 
-        primaryGrid = resizeGrid(primaryGrid, targetColumns, targetRows)
-        alternateGrid = resizeGrid(alternateGrid, targetColumns, targetRows)
+        // Anchor on the cursor, not on the top of the grid. Squeezing the
+        // window (a split-screen tablet, a resized DeX window) used to drop
+        // the *bottom* rows, which is exactly where the prompt and the newest
+        // output live — the screen appeared to fill with stale text. Keeping
+        // the newest rows and pushing what falls off the top into scrollback
+        // is what a desktop terminal does, and loses nothing.
+        val droppedFromTop = rowsDroppedWhenShrinking(
+            lastUsedRow = maxOf(cursorRow, lastNonBlankRow()),
+            targetRows = targetRows,
+        )
+        for (row in 0 until droppedFromTop) {
+            pushScrollback(primaryGrid[row])
+        }
+
+        primaryGrid = resizeGrid(primaryGrid, targetColumns, targetRows, droppedFromTop)
+        // The alternate screen belongs to a full-screen program (vim, btop,
+        // top). Those repaint every cell on the next frame, so shifting their
+        // content would only show a torn picture in the meantime.
+        alternateGrid = resizeGrid(alternateGrid, targetColumns, targetRows, skipRows = 0)
         grid = if (isAlternateScreen) alternateGrid else primaryGrid
 
         columns = targetColumns
         rows = targetRows
-        cursorRow = cursorRow.coerceIn(0, rows - 1)
+        cursorRow = (cursorRow - droppedFromTop).coerceIn(0, rows - 1)
         cursorColumn = cursorColumn.coerceIn(0, columns - 1)
         tabStops = defaultTabStops(columns)
         wrapPending = false
         resetScrollRegionLocked()
         touched()
+    }
+
+    /** The bottom-most row holding anything visible, or 0 when all blank. */
+    private fun lastNonBlankRow(): Int {
+        for (row in rows - 1 downTo 0) {
+            if (grid[row].trimmedText().isNotEmpty()) return row
+        }
+        return 0
     }
 
     // ---- Render access -----------------------------------------------------
@@ -725,13 +750,16 @@ class TerminalScreenBuffer(
         while (scrollback.size > scrollbackLimit) scrollback.removeFirst()
     }
 
+    /** Rebuilds the grid, starting [skipRows] rows further down the old one. */
     private fun resizeGrid(
         old: Array<TerminalRow>,
         newColumns: Int,
         newRows: Int,
+        skipRows: Int,
     ): Array<TerminalRow> = Array(newRows) { rowIndex ->
         TerminalRow(newColumns).also { row ->
-            if (rowIndex < old.size) row.copyFrom(old[rowIndex])
+            val sourceRow = rowIndex + skipRows
+            if (sourceRow < old.size) row.copyFrom(old[sourceRow])
         }
     }
 
@@ -751,6 +779,16 @@ class TerminalScreenBuffer(
         const val MIN_COLUMNS = 2
         const val MIN_ROWS = 2
         const val DEFAULT_SCROLLBACK_ROWS = 2_000
+
+        /**
+         * How many rows fall off the top when the window shrinks to
+         * [targetRows], given that [lastUsedRow] is the lowest row in use.
+         *
+         * Zero when the window grows or the content already fits, so growing
+         * a window never disturbs what is on screen.
+         */
+        fun rowsDroppedWhenShrinking(lastUsedRow: Int, targetRows: Int): Int =
+            (lastUsedRow + 1 - targetRows).coerceAtLeast(0)
 
         private fun defaultTabStops(columns: Int) =
             BooleanArray(columns) { it > 0 && it % 8 == 0 }

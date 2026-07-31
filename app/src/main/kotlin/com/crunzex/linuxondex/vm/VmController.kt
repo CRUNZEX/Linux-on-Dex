@@ -24,6 +24,7 @@ import com.crunzex.linuxondex.engine.qemu.QemuAccelerator
 import com.crunzex.linuxondex.engine.qemu.QemuVmEngine
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
+import com.crunzex.linuxondex.usb.OpenUsbDevice
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -38,6 +39,11 @@ class VmController(
     private val diskManager: DiskImageManager,
     private val repository: VmRepository,
     private val preparedImages: PreparedImageRepository,
+    /**
+     * Opens the USB devices a boot should hand to the guest. Defaults to
+     * passing nothing so the controller works in tests.
+     */
+    private val usbDeviceProvider: (VmConfig) -> List<OpenUsbDevice> = { _ -> emptyList() },
 ) {
     private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
@@ -221,7 +227,9 @@ class VmController(
     }
 
     private fun qemuEngine(accelerator: QemuAccelerator): QemuVmEngine =
-        QemuVmEngine(paths, payloadInstaller, diskManager, accelerator)
+        QemuVmEngine(paths, payloadInstaller, diskManager, accelerator).apply {
+            usbDeviceProvider = this@VmController.usbDeviceProvider
+        }
 
     private fun attachEngine(engine: VirtualizationEngine) {
         stateMirror?.cancel()

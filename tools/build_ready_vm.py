@@ -330,6 +330,7 @@ write_files:
     content: |
       [Service]
       Environment=TERM=xterm-256color
+      Environment=COLORTERM=truecolor
       ExecStart=
       ExecStart=-/sbin/agetty --autologin {username} --noclear %I $TERM
   # The app's extra terminal windows attach to virtio consoles
@@ -339,6 +340,7 @@ write_files:
     content: |
       [Service]
       Environment=TERM=xterm-256color
+      Environment=COLORTERM=truecolor
       ExecStart=
       ExecStart=-/sbin/agetty --autologin {username} --noclear %I $TERM
   - path: /etc/systemd/system/serial-getty@hvc1.service.d/autologin.conf
@@ -346,6 +348,7 @@ write_files:
     content: |
       [Service]
       Environment=TERM=xterm-256color
+      Environment=COLORTERM=truecolor
       ExecStart=
       ExecStart=-/sbin/agetty --autologin {username} --noclear %I $TERM
   - path: /etc/sysctl.d/99-dex.conf
@@ -368,6 +371,20 @@ write_files:
   # Serial lines cannot deliver SIGWINCH, so the guest never learns the
   # terminal size. This asks the terminal directly (cursor-position report)
   # at login, and by hand via `fix_console` after a resize.
+  # Colour lives in its own file, sorted early on purpose: /etc/profile
+  # sources profile.d in glob order, and a `return` inside any one of those
+  # scripts ends the *whole* loop — cloud-init's locale script does exactly
+  # that, so anything sorted after it never ran. That is why a serial login
+  # kept TERM=dumb and every program turned colour off, while `sudo`, which
+  # builds its own environment, looked fine.
+  - path: /etc/profile.d/10-linux-on-dex-colour.sh
+    permissions: "0644"
+    content: |
+      case "${{TERM:-}}" in
+          ""|dumb|unknown|vt100|vt102|vt220|linux) TERM=xterm-256color ;;
+      esac
+      export TERM
+      export COLORTERM=truecolor
   - path: /etc/profile.d/98-linux-on-dex-console.sh
     permissions: "0644"
     content: |
@@ -434,7 +451,14 @@ runcmd:
   # autologin drop-in existed would keep prompting for a password.
   - [sh, -c, "systemctl restart serial-getty@hvc0.service 2>/dev/null || true"]
   - [sh, -c, "systemctl restart serial-getty@hvc1.service 2>/dev/null || true"]
-{extra_runcmd}  # Everything above is now baked into the disk. Without this flag,
+{extra_runcmd}  # Hand every block the install no longer needs back to the image
+  # file. Package archives and temporary files were written and deleted,
+  # and until they are discarded the qcow2 keeps paying for them: the
+  # compaction pass afterwards can only drop clusters it knows are free.
+  - [sh, -c, "apt-get clean 2>/dev/null || true"]
+  - [sh, -c, "rm -rf /var/lib/apt/lists/* /var/log/journal/* /tmp/* 2>/dev/null || true"]
+  - [sh, -c, "fstrim -av || true"]
+  # Everything above is now baked into the disk. Without this flag,
   # cloud-init would re-run all four of its stages on every later boot —
   # several seconds of pure start-up cost under software emulation.
   - [touch, /etc/cloud/cloud-init.disabled]

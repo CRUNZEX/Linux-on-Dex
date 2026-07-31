@@ -3,6 +3,7 @@ package com.crunzex.linuxondex.ui.components
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import com.crunzex.linuxondex.capability.DexEnvironment
 
 /**
@@ -16,5 +17,11 @@ import com.crunzex.linuxondex.capability.DexEnvironment
 @Composable
 fun rememberDexModeActive(): Boolean {
     val configuration = LocalConfiguration.current
-    return remember(configuration) { DexEnvironment.isDesktopMode(configuration) }
+    // The window's own context: it carries the display this window is on and
+    // reaches Samsung's desktop-mode service. The application context knows
+    // neither, which is why detection used to stay "Not active".
+    val context = LocalContext.current
+    return remember(configuration, context) {
+        DexEnvironment.isDesktopMode(configuration, context)
+    }
 }
