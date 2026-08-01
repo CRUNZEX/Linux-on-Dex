@@ -196,7 +196,10 @@ GNOME_PROFILE = DesktopProfile(
       disable-external=true
       [org/gnome/mutter]
       # No GPU: skip the overlay-scaling work the compositor would attempt.
-      experimental-features=[]
+      # An empty array needs its type spelled out or `dconf update` refuses
+      # the whole database — which fails ibus's postinst and with it the
+      # entire desktop install.
+      experimental-features=@as []
       [org/gnome/shell]
       disable-user-extensions=false
   # GTK4 apps (nautilus, text editor, settings) default to a GL renderer,

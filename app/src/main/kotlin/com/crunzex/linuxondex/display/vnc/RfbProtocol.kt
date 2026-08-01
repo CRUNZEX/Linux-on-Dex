@@ -30,6 +30,37 @@ object RfbProtocol {
     const val ENCODING_DESKTOP_SIZE = -223
 
     /**
+     * Cursor pseudo-encoding: asks the server to send the mouse pointer as a
+     * separate sprite instead of drawing it into the framebuffer.
+     *
+     * This is what stops a pointer from appearing on screen at all. Without
+     * it, the X server paints its arrow into the pixels it sends, so the
+     * touch position and the drawn arrow are two different things and the
+     * desktop feels like it is being operated at a distance. Requesting the
+     * sprite and then throwing it away leaves the framebuffer clean, and
+     * every tap simply acts where the finger is.
+     *
+     * It also cuts work: a moving pointer no longer dirties the rectangles it
+     * passes over, so an otherwise idle desktop stops sending frames.
+     */
+    const val ENCODING_CURSOR = -239
+
+    /**
+     * Bytes of pointer-sprite payload for a cursor rectangle: the image
+     * itself plus a 1-bit-per-pixel transparency mask, whose rows are padded
+     * to whole bytes.
+     *
+     * Read and discarded rather than skipped blindly, because the length is
+     * not in the message — miscounting it by one byte desynchronises the
+     * whole stream.
+     */
+    fun cursorRectangleByteCount(width: Int, height: Int): Int {
+        val imageBytes = width * height * BYTES_PER_PIXEL
+        val maskBytes = ((width + 7) / 8) * height
+        return imageBytes + maskBytes
+    }
+
+    /**
      * Wire size of one received pixel, and the single source of truth for
      * every buffer that holds pixel data.
      *

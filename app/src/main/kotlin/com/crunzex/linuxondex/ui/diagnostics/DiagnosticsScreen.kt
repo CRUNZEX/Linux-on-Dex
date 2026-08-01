@@ -19,10 +19,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.crunzex.linuxondex.capability.GuestGraphicsSupport
 import com.crunzex.linuxondex.capability.KvmAccess
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.engine.EngineAvailability
@@ -141,16 +143,16 @@ private fun DisplayPathGroup() {
             else MaterialTheme.colorScheme.error,
         )
         RowDivider()
+        // Measured on this device by trying to open every GPU node, rather
+        // than assumed: "PRoot runs natively, so the GPU should work" is a
+        // fair expectation, and it deserves a real answer instead of a claim.
+        val guestGraphics = remember { GuestGraphicsSupport.measure() }
         ListRow(
             title = "Guest 3D acceleration",
-            // Measured, not assumed: the packaged QEMU offers only
-            // virtio-gpu-pci (no virtio-gpu-gl-pci) and no egl-headless
-            // display, so there is no path from guest GL to the phone GPU.
-            // Enabling it needs a QEMU rebuilt against virglrenderer, not a
-            // setting — see the notes in the repository README.
-            subtitle = "The packaged VM runtime has no 3D device, so guest " +
-                "graphics are drawn by the CPU. Lower the resolution for speed.",
-            value = "Software (llvmpipe)",
+            subtitle = GuestGraphicsSupport.explain(guestGraphics),
+            value = guestGraphics.renderer.displayName,
+            valueColor = if (guestGraphics.isHardware) OneUiPalette.SuccessGreen
+            else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

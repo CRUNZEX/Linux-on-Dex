@@ -44,6 +44,12 @@ data class MainUiState(
     val configurationProblems: List<String> = emptyList(),
     /** Ready-made VM images found on the device. */
     val preparedImages: List<PreparedImage> = emptyList(),
+    /**
+     * True when the selected container image has already been unpacked, so
+     * the next start goes straight to the desktop. Always false for disk
+     * images, which have nothing to unpack.
+     */
+    val isRootfsExtracted: Boolean = false,
     /** Non-null while an ISO import is running: 0.0..1.0, or -1f if unknown. */
     val isoImportProgress: Float? = null,
     /** Non-null while a VM image import is running. */
@@ -183,6 +189,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
                         configurationProblems =
                             config.validationProblems(capabilities.totalRamMb),
                         preparedImages = container.vmController.listPreparedImages(),
+                        isRootfsExtracted = container.vmController.isContainerImageReady(config),
                         attachedUsbDevices = container.usbDeviceMonitor.attachedDevices(),
                         backups = container.vmBackupManager.listBackups(),
                     )

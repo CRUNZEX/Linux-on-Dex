@@ -44,6 +44,14 @@ data class VmConfig(
     /** True when this VM runs a ready-made image rather than an installer. */
     val usesPreparedImage: Boolean get() = preparedImage != null
 
+    /**
+     * True when the selected image is a rootfs archive, which only the PRoot
+     * engine can run. The artifact decides the engine: QEMU cannot boot a
+     * directory tree any more than PRoot can boot a qcow2.
+     */
+    val runsInProotContainer: Boolean
+        get() = preparedImage?.format == PreparedImageFormat.PROOT_ROOTFS
+
     /** True when the installer ISO should be attached and bootable. */
     val bootsFromInstaller: Boolean
         get() = !usesPreparedImage &&
@@ -85,33 +93,84 @@ data class VmConfig(
         const val MIN_MEMORY_MB = 512
         const val MAX_MEMORY_MB = 32 * 1024
 
-        /** Android needs headroom; never hand the guest more than this. */
-        fun maxSafeGuestMemoryMb(deviceTotalRamMb: Int): Int =
-            (deviceTotalRamMb - ANDROID_RESERVED_RAM_MB).coerceAtLeast(MIN_MEMORY_MB)
+        /**
+         * The most memory the guest may be given: the device's size less the
+         * 2 GB Android keeps for itself. A 12 GB phone therefore offers
+         * 10240 MB.
+         *
+         * The device size is taken as the capacity it was built with, not
+         * the figure the kernel reports: a 12 GB phone reports about
+         * 11122 MB, the rest having been carved out for the kernel, the
+         * modem and other firmware before Linux ever saw it. Subtracting
+         * from the reported number would quietly offer 9074 MB on a phone
+         * the user knows has 12 GB. See [fittedMemoryMb].
+         *
+         * Handing out more than the kernel reports is safe in the way that
+         * matters: this is a ceiling on a *setting*, and a guest only
+         * occupies the memory it actually touches — a VM given 10 GB that
+         * uses 2 GB costs 2 GB.
+         */
+        fun maxSafeGuestMemoryMb(deviceTotalRamMb: Int): Int {
+            val physicalRamMb = fittedMemoryMb(deviceTotalRamMb)
+            return (physicalRamMb - ANDROID_RESERVED_RAM_MB).coerceAtLeast(MIN_MEMORY_MB)
+        }
+
+        /**
+         * How much memory the device is actually fitted with, given what the
+         * kernel reports.
+         *
+         * Rounding up to the next whole gigabyte is not enough: a 12 GB phone
+         * reports about 11122 MB, which is 10.9 GB, and would round to 11 GB —
+         * still short of the 12 GB on the box. Memory is only sold in a
+         * handful of sizes, so the reported figure is matched to the smallest
+         * one that could contain it.
+         */
+        private fun fittedMemoryMb(reportedRamMb: Int): Int {
+            if (reportedRamMb <= 0) return 0
+            return FITTED_MEMORY_SIZES_MB.firstOrNull { size -> size >= reportedRamMb }
+                ?: reportedRamMb
+        }
+
+        /** The memory capacities phones are actually built with, ascending. */
+        private val FITTED_MEMORY_SIZES_MB = listOf(
+            2 * 1024, 3 * 1024, 4 * 1024, 6 * 1024, 8 * 1024, 10 * 1024,
+            12 * 1024, 16 * 1024, 18 * 1024, 24 * 1024, 32 * 1024,
+        )
 
         private const val ANDROID_RESERVED_RAM_MB = 2048
 
         /**
-         * Defaults scaled to the device: roughly a third of RAM (capped at
-         * 4 GB), and all cores but two. Guest rendering is software
-         * (llvmpipe scales with threads), so vCPUs are the main smoothness
-         * lever; keeping two big cores back leaves Android responsive.
+         * What a new VM starts with: 4 vCPUs and 4 GB.
+         *
+         * A fixed pair rather than a fraction of the device, because these
+         * are the numbers a desktop distribution actually wants, and every
+         * phone this app supports can spare them. Both are still clamped to
+         * what the device has, so a smaller or older device gets something
+         * that works instead of something that cannot start.
          */
-        fun createDefault(totalDeviceRamMb: Int, availableCpuCores: Int): VmConfig {
-            val guestMemoryMb = (totalDeviceRamMb / 3)
-                .coerceIn(MIN_MEMORY_MB, 4 * 1024)
+        fun createDefault(totalDeviceRamMb: Int, availableCpuCores: Int): VmConfig = VmConfig(
+            id = "primary",
+            name = "Linux VM",
+            cpu = CpuConfig(coreCount = defaultCoreCount(availableCpuCores)),
+            memoryMb = defaultMemoryMb(totalDeviceRamMb),
+        )
+
+        /** The default guest size, 4 GB, lowered if the device cannot spare it. */
+        fun defaultMemoryMb(totalDeviceRamMb: Int): Int {
+            if (totalDeviceRamMb <= 0) return DEFAULT_MEMORY_MB
+            return DEFAULT_MEMORY_MB
                 .coerceAtMost(maxSafeGuestMemoryMb(totalDeviceRamMb))
-            return VmConfig(
-                id = "primary",
-                name = "Linux VM",
-                cpu = CpuConfig(coreCount = defaultCoreCount(availableCpuCores)),
-                memoryMb = guestMemoryMb,
-            )
+                .coerceAtLeast(MIN_MEMORY_MB)
         }
 
-        /** All but two device cores, within [2, 6]. */
+        /** Four vCPUs, but never more than the device physically has. */
         fun defaultCoreCount(availableCpuCores: Int): Int =
-            (availableCpuCores - 2).coerceIn(2, 6)
+            if (availableCpuCores <= 0) DEFAULT_CORE_COUNT
+            else DEFAULT_CORE_COUNT.coerceAtMost(availableCpuCores)
+                .coerceIn(CpuConfig.MIN_CORES, CpuConfig.MAX_CORES)
+
+        const val DEFAULT_CORE_COUNT = 4
+        const val DEFAULT_MEMORY_MB = 4096
 
         /**
          * A desktop distribution ISO (Ubuntu, Fedora Workstation…) needs far
@@ -460,6 +519,43 @@ enum class BootOrder(val displayName: String, val description: String) {
 }
 
 /**
+ * What kind of artifact a ready-made image is — which decides the engine
+ * that runs it. A qcow2 is a block device only QEMU can boot; a rootfs
+ * archive is a directory tree only PRoot can run. The two are not
+ * interchangeable, so the format travels with the image instead of being
+ * guessed at boot time.
+ */
+@Serializable
+enum class PreparedImageFormat(val displayName: String) {
+    /** A qcow2/raw disk image, booted as a full virtual machine. */
+    QCOW2_DISK("Virtual machine disk"),
+
+    /**
+     * A Linux root filesystem archive, run through PRoot's syscall
+     * translation at native CPU speed — no emulation, which is what makes
+     * a desktop usable on devices where /dev/kvm is denied.
+     */
+    PROOT_ROOTFS("Native container (PRoot)");
+
+    companion object {
+        /** Marks a rootfs archive: `<name>.rootfs.tar.gz`. */
+        const val ROOTFS_ARCHIVE_SUFFIX = ".rootfs.tar.gz"
+
+        private val DISK_IMAGE_EXTENSIONS = setOf("qcow2", "img")
+
+        /** The format a file name announces, or null for unrelated files. */
+        fun fromFileName(fileName: String): PreparedImageFormat? {
+            val lower = fileName.lowercase()
+            return when {
+                lower.endsWith(ROOTFS_ARCHIVE_SUFFIX) -> PROOT_ROOTFS
+                lower.substringAfterLast('.') in DISK_IMAGE_EXTENSIONS -> QCOW2_DISK
+                else -> null
+            }
+        }
+    }
+}
+
+/**
  * A ready-made VM: an already-installed disk image, plus the optional
  * cloud-init seed that configures its first boot.
  *
@@ -471,7 +567,10 @@ enum class BootOrder(val displayName: String, val description: String) {
 data class PreparedImageConfig(
     /** Name shown in the UI, e.g. "Ubuntu 24.04 (ready-made)". */
     val displayName: String,
-    /** Absolute path of the qcow2 root disk inside app storage. */
+    /**
+     * Absolute path of the image inside app storage: a qcow2/raw disk, or —
+     * when [format] is [PreparedImageFormat.PROOT_ROOTFS] — a rootfs archive.
+     */
     val diskImagePath: String,
     /** Absolute path of the cloud-init seed ISO, if the image needs one. */
     val seedIsoPath: String? = null,
@@ -480,6 +579,8 @@ data class PreparedImageConfig(
     val password: String = DEFAULT_PASSWORD,
     /** Cloud-init only needs the seed on the very first boot. */
     val firstBootCompleted: Boolean = false,
+    /** Defaults to a disk so configs saved before this field existed still load. */
+    val format: PreparedImageFormat = PreparedImageFormat.QCOW2_DISK,
 ) {
     companion object {
         const val DEFAULT_USERNAME = "dex"
@@ -518,9 +619,24 @@ data class KernelBootConfig(
 }
 
 @Serializable
-enum class EngineOverride(val displayName: String) {
-    AUTO("Automatic (recommended)"),
-    FORCE_KVM("Force hardware VM"),
-    FORCE_TCG("Force software VM"),
-    FORCE_PROOT("Force compatibility container"),
+enum class EngineOverride(
+    val displayName: String,
+    val description: String,
+) {
+    AUTO(
+        "Automatic (recommended)",
+        "Best available: hardware VM, then software VM, then PRoot",
+    ),
+    FORCE_KVM(
+        "Force hardware VM",
+        "Needs /dev/kvm, which stock Samsung firmware denies to apps",
+    ),
+    FORCE_TCG(
+        "Force software VM",
+        "Full virtual machine under emulation — boots any ARM64 distro",
+    ),
+    FORCE_PROOT(
+        "Force PRoot container",
+        "No VM: runs Linux at native speed — the smooth choice for desktops",
+    ),
 }

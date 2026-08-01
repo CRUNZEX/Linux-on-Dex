@@ -4,7 +4,8 @@ import com.crunzex.linuxondex.capability.DeviceCapabilities
 import com.crunzex.linuxondex.capability.KvmAccess
 
 /**
- * The three supported ways to run Linux, best first.
+ * The three supported ways to run Linux, ranked by how complete a system
+ * each one gives — which is not the same as how fast it feels.
  *
  * 1. [QEMU_KVM]  — hardware-accelerated full VM. Needs /dev/kvm, which stock
  *                  Samsung firmware currently denies to apps; present for
@@ -12,8 +13,11 @@ import com.crunzex.linuxondex.capability.KvmAccess
  * 2. [QEMU_TCG]  — software full VM (multi-threaded TCG). Works on any
  *                  Android 13-16 device without special permissions, boots
  *                  unmodified ARM64 Linux ISOs.
- * 3. [PROOT]     — syscall-translation container. Not a VM: no ISO boot, but
- *                  gives a usable Linux userland when QEMU cannot run.
+ * 3. [PROOT]     — syscall-translation container: no guest kernel and no ISO
+ *                  boot, so it ranks last for generality. It is however the
+ *                  only option that runs guest code at **native CPU speed**,
+ *                  which is why the ready-made desktop images use it — a
+ *                  container image selects it regardless of this ranking.
  */
 enum class EngineKind(
     val displayName: String,
@@ -29,7 +33,9 @@ enum class EngineKind(
 ) {
     QEMU_KVM("Hardware VM", "QEMU with KVM acceleration", shutdownGraceSeconds = 45),
     QEMU_TCG("Software VM", "QEMU full-system emulation", shutdownGraceSeconds = 180),
-    PROOT("Compatibility container", "PRoot userspace Linux", shutdownGraceSeconds = 15),
+    // A graphical session needs longer than a shell to wind down: the
+    // supervisor stops GNOME, the X server and sshd before it exits.
+    PROOT("Native container", "PRoot at full CPU speed — no emulation", shutdownGraceSeconds = 30),
 }
 
 /** Whether an engine can run here, and if not, exactly why. */

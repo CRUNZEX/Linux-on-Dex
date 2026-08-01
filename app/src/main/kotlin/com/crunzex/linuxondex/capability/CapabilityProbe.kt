@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.res.Configuration
 import android.os.Build
+import android.os.SystemClock
 import com.crunzex.linuxondex.core.AppLog
 import java.io.File
 import java.io.RandomAccessFile
@@ -19,22 +20,63 @@ import java.util.concurrent.TimeUnit
  */
 class CapabilityProbe(private val context: Context) {
 
+    /**
+     * The last snapshot and when it was taken. Probing forks a process and
+     * opens device nodes, so it is far too expensive to repeat per UI read —
+     * and the screens ask for it often. Guarded by [cacheLock] because the
+     * UI, the view model and the VM controller all probe from their own
+     * threads.
+     */
+    private val cacheLock = Any()
+    private var cachedCapabilities: DeviceCapabilities? = null
+    private var cachedAtElapsedMillis = 0L
+    private var lastLoggedCapabilities: DeviceCapabilities? = null
+
+    /**
+     * Device capabilities, re-measured at most once per
+     * [CACHE_LIFETIME_MILLIS]. The window is short enough that docking into
+     * DeX or a payload repair shows up almost immediately, and long enough
+     * that a burst of reads costs a single measurement.
+     */
     fun probe(): DeviceCapabilities {
-        val capabilities = DeviceCapabilities(
-            apiLevel = Build.VERSION.SDK_INT,
-            isArm64 = Build.SUPPORTED_64_BIT_ABIS.contains(ARM64_ABI),
-            kvm = probeKvmAccess(),
-            hasVirtualizationFramework = probeVirtualizationFramework(),
-            canForkExec = probeForkExec(),
-            qemuPayloadPresent = nativeLibraryExists(QEMU_SYSTEM_LIB),
-            prootPayloadPresent = nativeLibraryExists(PROOT_LIB),
-            totalRamMb = probeTotalRamMb(),
-            isDexModeActive = probeDexMode(),
-            deviceModel = Build.MODEL ?: "unknown",
-        )
-        AppLog.info(SCOPE, "Probe result: $capabilities")
-        return capabilities
+        synchronized(cacheLock) {
+            val cached = cachedCapabilities
+            val ageMillis = SystemClock.elapsedRealtime() - cachedAtElapsedMillis
+            if (cached != null && ageMillis < CACHE_LIFETIME_MILLIS) return cached
+        }
+
+        val measured = measureCapabilities()
+        synchronized(cacheLock) {
+            cachedCapabilities = measured
+            cachedAtElapsedMillis = SystemClock.elapsedRealtime()
+            // Log only when something actually changed. The diagnostics log
+            // is a bounded ring buffer, and an unchanged snapshot repeated
+            // hundreds of times pushes out the lines that explain a failure.
+            if (measured != lastLoggedCapabilities) {
+                lastLoggedCapabilities = measured
+                AppLog.info(SCOPE, "Probe result: $measured")
+            }
+        }
+        return measured
     }
+
+    /** Forces the next [probe] to measure again — e.g. after a payload repair. */
+    fun invalidateCache() {
+        synchronized(cacheLock) { cachedCapabilities = null }
+    }
+
+    private fun measureCapabilities() = DeviceCapabilities(
+        apiLevel = Build.VERSION.SDK_INT,
+        isArm64 = Build.SUPPORTED_64_BIT_ABIS.contains(ARM64_ABI),
+        kvm = probeKvmAccess(),
+        hasVirtualizationFramework = probeVirtualizationFramework(),
+        canForkExec = probeForkExec(),
+        qemuPayloadPresent = nativeLibraryExists(QEMU_SYSTEM_LIB),
+        prootPayloadPresent = nativeLibraryExists(PROOT_LIB),
+        totalRamMb = probeTotalRamMb(),
+        isDexModeActive = probeDexMode(),
+        deviceModel = Build.MODEL ?: "unknown",
+    )
 
     /**
      * The only trustworthy KVM check is opening the node: stock Samsung
@@ -122,6 +164,9 @@ class CapabilityProbe(private val context: Context) {
         private const val FEATURE_VIRTUALIZATION_FRAMEWORK =
             "android.software.virtualization_framework"
         private const val EXEC_PROBE_TIMEOUT_SECONDS = 5L
+
+        /** How long a snapshot stays usable before it is measured again. */
+        private const val CACHE_LIFETIME_MILLIS = 2_000L
         private val SYSTEM_TRUE_COMMAND = listOf("/system/bin/toybox", "true")
 
         /** Native-lib file names the payload pipeline produces. */

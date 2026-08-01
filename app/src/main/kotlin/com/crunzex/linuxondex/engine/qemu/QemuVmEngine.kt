@@ -19,8 +19,6 @@ import com.crunzex.linuxondex.core.LxdError
 import com.crunzex.linuxondex.engine.EngineKind
 import com.crunzex.linuxondex.engine.SerialConsoleConnection
 import com.crunzex.linuxondex.engine.VirtualizationEngine
-import com.crunzex.linuxondex.engine.runtime.JavaLaunchedProcess
-import com.crunzex.linuxondex.engine.runtime.LaunchedProcess
 import com.crunzex.linuxondex.engine.runtime.NativeCommand
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
@@ -60,7 +58,7 @@ class QemuVmEngine(
     private val lifecycleMutex = Mutex()
     private val shutdownInitiated = AtomicBoolean(false)
 
-    private var vmProcess: LaunchedProcess? = null
+    private var vmProcess: Process? = null
     private var exitWatcher: Job? = null
     private var activeConfig: VmConfig? = null
 
@@ -124,7 +122,7 @@ class QemuVmEngine(
             environment = paths.processEnvironment(),
             workingDirectory = paths.vmRootDir,
         )
-        val process = JavaLaunchedProcess(command.start(redirectErrorStream = true))
+        val process = command.start(redirectErrorStream = true)
         vmProcess = process
         pumpProcessOutput(process, processLogFile(config.id))
         watchProcessExit(process, config)
@@ -234,7 +232,7 @@ class QemuVmEngine(
     }
 
     /** QEMU can take a while to create the QMP socket; poll until it accepts. */
-    private fun waitForControlChannel(process: LaunchedProcess, config: VmConfig) {
+    private fun waitForControlChannel(process: Process, config: VmConfig) {
         val socketFile = qmpSocketFile(config.id)
         val deadline = System.currentTimeMillis() + CONTROL_CHANNEL_TIMEOUT_MS
         var lastFailure: Exception? = null
@@ -416,11 +414,11 @@ class QemuVmEngine(
         false
     }
 
-    private fun pumpProcessOutput(process: LaunchedProcess, logFile: File) {
+    private fun pumpProcessOutput(process: Process, logFile: File) {
         engineScope.launch {
             try {
                 logFile.outputStream().bufferedWriter().use { sink ->
-                    process.output.bufferedReader().forEachLine { line ->
+                    process.inputStream.bufferedReader().forEachLine { line ->
                         sink.appendLine(line)
                         sink.flush()
                         if (deservesAttention(line)) {
@@ -439,7 +437,7 @@ class QemuVmEngine(
         }
     }
 
-    private fun watchProcessExit(process: LaunchedProcess, config: VmConfig) {
+    private fun watchProcessExit(process: Process, config: VmConfig) {
         exitWatcher = engineScope.launch {
             val exitCode = runCatching { process.waitFor() }.getOrDefault(-1)
             if (shutdownInitiated.get()) return@launch // stop()/forceStop() owns the state

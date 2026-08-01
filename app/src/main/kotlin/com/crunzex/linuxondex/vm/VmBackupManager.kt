@@ -26,10 +26,14 @@ data class VmBackup(
  * Saves the virtual machine's disk to a file the user can copy off the
  * phone, and lists what has already been saved.
  *
- * The copy is made with `qemu-img convert`, not a plain file copy: it
- * rewrites the image without the blocks the guest has discarded, so a
- * backup is usually far smaller than the live disk, and it verifies the
- * source is a readable qcow2 on the way through.
+ * A backup keeps the form of what it copied. A disk image is rewritten with
+ * `qemu-img convert`, which drops the blocks the guest has discarded — so the
+ * backup is usually far smaller than the live disk — and proves the source is
+ * a readable qcow2 on the way past. A container archive is copied as it is,
+ * because it is already compressed and is the very file an import expects.
+ *
+ * Either way the name keeps its suffix and gains a timestamp, so a backup can
+ * be imported straight back without being renamed.
  *
  * Backups land in the app's own folder on shared storage, which is visible
  * over USB and to the Files app without any permission.
@@ -54,7 +58,9 @@ class VmBackupManager(
     fun listBackups(): List<VmBackup> = try {
         backupDirectory().listFiles()
             .orEmpty()
-            .filter { it.isFile && it.extension.equals(DISK_EXTENSION, ignoreCase = true) }
+            // Both kinds of image count: a container archive is as much a
+            // backup as a disk, and listing only disks would hide half of them.
+            .filter { it.isFile && isBackupFile(it.name) }
             .map { VmBackup(it, it.length() shr 20, it.lastModified()) }
             .sortedByDescending { it.createdAtMillis }
     } catch (unreadable: Exception) {
@@ -73,16 +79,46 @@ class VmBackupManager(
         // Whatever this VM actually boots: a ready-made image, or its own disk.
         val source = diskManager.bootDiskFile(config)
         if (!source.isFile) {
-            throw LxdError.StorageFailed("this virtual machine has no disk to back up yet")
+            throw LxdError.StorageFailed("this virtual machine has nothing to back up yet")
         }
         val destination = File(backupDirectory(), backupFileName(source.name, now))
 
         AppLog.info(SCOPE, "backing up ${source.name} -> ${destination.name}")
+        try {
+            // A backup has to stay the kind of thing it was: a disk image is
+            // rewritten by qemu-img, a container archive is copied. Running
+            // qemu-img over an archive would fail, and a plain copy of a disk
+            // would forfeit the shrinking a rewrite gives.
+            when (PreparedImageFormat.fromFileName(source.name)) {
+                PreparedImageFormat.PROOT_ROOTFS -> copyArchive(source, destination)
+                else -> convertDiskImage(source, destination)
+            }
+        } catch (failure: Exception) {
+            destination.delete()
+            throw failure as? LxdError
+                ?: LxdError.StorageFailed("backup failed: ${failure.message}", failure)
+        }
+
+        if (!destination.isFile || destination.length() == 0L) {
+            destination.delete()
+            throw LxdError.StorageFailed("backup produced no file")
+        }
+        return VmBackup(destination, destination.length() shr 20, destination.lastModified())
+    }
+
+    /**
+     * Rewrites a disk image with `qemu-img convert`.
+     *
+     * Not a plain copy: the rewrite drops the blocks the guest has discarded,
+     * so a backup is usually far smaller than the live disk, and reading the
+     * source through qemu-img proves it is a valid image on the way past.
+     */
+    private fun convertDiskImage(source: File, destination: File) {
         val qemuImg = NativeCommand(
             program = paths.qemuImgBinary,
             arguments = listOf(
                 "convert",
-                "-O", "qcow2",
+                "-O", DISK_EXTENSION,
                 source.absolutePath,
                 destination.absolutePath,
             ),
@@ -90,14 +126,35 @@ class VmBackupManager(
         )
         val result = qemuImg.runAndCaptureOutput(timeoutSeconds = BACKUP_TIMEOUT_SECONDS)
         if (!result.isSuccess) {
-            destination.delete()
             throw LxdError.StorageFailed("backup failed: ${result.output.take(200)}")
         }
-        if (!destination.isFile || destination.length() == 0L) {
-            destination.delete()
-            throw LxdError.StorageFailed("backup produced no file")
+    }
+
+    /**
+     * Copies a container archive byte for byte.
+     *
+     * There is nothing to rewrite: the archive is already compressed, and it
+     * is the exact file the app extracts a container from, so a copy of it
+     * restores by being imported again like any other image.
+     */
+    private fun copyArchive(source: File, destination: File) {
+        requireFreeSpaceFor(destination, source.length())
+        source.inputStream().use { input ->
+            destination.outputStream().use { output ->
+                input.copyTo(output, COPY_BUFFER_BYTES)
+            }
         }
-        return VmBackup(destination, destination.length() shr 20, destination.lastModified())
+    }
+
+    /** Refuses a copy that would fill the phone rather than failing part-way. */
+    private fun requireFreeSpaceFor(destination: File, requiredBytes: Long) {
+        val availableBytes = destination.parentFile?.usableSpace ?: return
+        if (availableBytes < requiredBytes + FREE_SPACE_HEADROOM_BYTES) {
+            throw LxdError.StorageFailed(
+                "needs ${(requiredBytes shr 20)} MB free but only " +
+                    "${availableBytes shr 20} MB is available"
+            )
+        }
     }
 
     /**
@@ -175,22 +232,54 @@ class VmBackupManager(
         private const val BACKUP_TIMEOUT_SECONDS = 30 * 60L
         private const val DISK_MIME_TYPE = "application/octet-stream"
         private const val COPY_BUFFER_BYTES = 1 shl 20
+        private const val FREE_SPACE_HEADROOM_BYTES = 128L shl 20
 
         /** Stamp format: sorts chronologically as plain text. */
         private const val TIMESTAMP_PATTERN = "yyyyMMdd-HHmmss"
 
         /**
          * The backup's name: the source image's name with the local date and
-         * time appended, e.g.
-         * `linux-on-dex-alpine-3.22.0-arm64-20260731-220431.qcow2`.
+         * time inserted before its extension, keeping the extension it had.
+         *
+         * ```
+         * linux-on-dex-alpine-3.22.0-arm64.qcow2
+         *     -> linux-on-dex-alpine-3.22.0-arm64-20260801-221023.qcow2
+         * linux-on-dex-debian-13-proot-arm64.rootfs.tar.gz
+         *     -> linux-on-dex-debian-13-proot-arm64-20260801-221023.rootfs.tar.gz
+         * ```
+         *
+         * Keeping the suffix is not cosmetic: it is what tells the app, and
+         * the user, which kind of image the file is. A container archive
+         * renamed `.qcow2` would be offered as a bootable disk and fail.
          *
          * Pure and separately tested — the name is what the user sees and
          * sorts by, so it must not drift.
          */
         fun backupFileName(sourceFileName: String, now: Date): String {
             val stamp = SimpleDateFormat(TIMESTAMP_PATTERN, Locale.US).format(now)
-            val base = sourceFileName.removeSuffix(".$DISK_EXTENSION")
-            return "$base-$stamp.$DISK_EXTENSION"
+            val suffix = backupSuffixOf(sourceFileName)
+            val base = sourceFileName.removeSuffix(suffix)
+            return "$base-$stamp$suffix"
         }
+
+        /**
+         * The part of a name that says what the file is: the whole
+         * `.rootfs.tar.gz` for a container, otherwise the last extension.
+         *
+         * A name with no extension is treated as a disk image, because that
+         * is what it is — the VM's own root disk, whose file name the user
+         * never sees.
+         */
+        private fun backupSuffixOf(fileName: String): String {
+            if (PreparedImageFormat.fromFileName(fileName) == PreparedImageFormat.PROOT_ROOTFS) {
+                return PreparedImageFormat.ROOTFS_ARCHIVE_SUFFIX
+            }
+            val lastDot = fileName.lastIndexOf('.')
+            return if (lastDot > 0) fileName.substring(lastDot) else ".$DISK_EXTENSION"
+        }
+
+        /** True when this file is one of the kinds a backup can be. */
+        fun isBackupFile(fileName: String): Boolean =
+            PreparedImageFormat.fromFileName(fileName) != null
     }
 }

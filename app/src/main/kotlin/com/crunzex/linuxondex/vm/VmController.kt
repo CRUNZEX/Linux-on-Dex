@@ -14,17 +14,21 @@ import com.crunzex.linuxondex.capability.CapabilityProbe
 import com.crunzex.linuxondex.capability.DeviceCapabilities
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.core.LxdError
+import com.crunzex.linuxondex.engine.EngineAvailability
 import com.crunzex.linuxondex.engine.EngineCandidate
 import com.crunzex.linuxondex.engine.EngineKind
 import com.crunzex.linuxondex.engine.EngineSelector
 import com.crunzex.linuxondex.engine.SerialConsoleConnection
 import com.crunzex.linuxondex.engine.VirtualizationEngine
 import com.crunzex.linuxondex.engine.proot.ProotEngine
+import com.crunzex.linuxondex.engine.proot.RootfsImageInstaller
 import com.crunzex.linuxondex.engine.qemu.QemuAccelerator
 import com.crunzex.linuxondex.engine.qemu.QemuVmEngine
+import com.crunzex.linuxondex.engine.runtime.GuestProcessReaper
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.usb.OpenUsbDevice
+import java.io.File
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -47,6 +51,8 @@ class VmController(
 ) {
     private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
+    private val rootfsInstaller = RootfsImageInstaller(paths)
+    private val guestProcessReaper = GuestProcessReaper(paths)
 
     private val _vmState = MutableStateFlow<VmState>(VmState.Idle)
     val vmState: StateFlow<VmState> = _vmState.asStateFlow()
@@ -100,6 +106,16 @@ class VmController(
     fun listPreparedImages(): List<PreparedImage> = preparedImages.listAvailable()
 
     /**
+     * True when [config]'s container image is already unpacked, so the next
+     * start skips extraction. False for disk images, which never extract.
+     */
+    fun isContainerImageReady(config: VmConfig): Boolean {
+        if (!config.runsInProotContainer) return false
+        val archive = config.preparedImage?.diskImagePath?.let(::File) ?: return false
+        return rootfsInstaller.isExtracted(archive)
+    }
+
+    /**
      * Imports a disk image picked in the file manager and selects it, so the
      * user never has to copy files onto the device by hand.
      */
@@ -121,6 +137,12 @@ class VmController(
             check(!_vmState.value.isBusy && !_vmState.value.isRunning) {
                 "VM already ${_vmState.value}"
             }
+            // A guest from an earlier session can outlive both its engine and
+            // the app, and it keeps the display port bound. Left in place it
+            // makes every later start fail with "address already in use" —
+            // the failure that used to leave force-stopping the app as the
+            // only way out.
+            guestProcessReaper.killAllGuestProcesses()
             val engine = createEngineFor(config)
             attachEngine(engine)
             AppLog.info(SCOPE, "starting '${config.id}' with ${engine.kind}")
@@ -134,9 +156,24 @@ class VmController(
      */
     suspend fun stopVm() {
         lifecycleMutex.withLock {
-            val engine = activeEngine ?: return
+            val engine = activeEngine
+            if (engine == null) {
+                // No engine to ask, yet a guest may still be running — the
+                // app can be restarted while its previous session lives on.
+                // Stop must always end in Stopped, or the UI offers a Stop
+                // button that does nothing and a Start that cannot succeed.
+                stopWithoutEngine()
+                return
+            }
             engine.stop(gracePeriod = engine.kind.shutdownGraceSeconds.seconds)
         }
+    }
+
+    /** Last-resort stop: kill whatever is left and report a stopped VM. */
+    private fun stopWithoutEngine() {
+        val killedCount = guestProcessReaper.killAllGuestProcesses()
+        AppLog.info(SCOPE, "stop requested with no active engine; killed $killedCount process(es)")
+        _vmState.value = VmState.Stopped(StopReason.FORCED)
     }
 
     /**
@@ -168,7 +205,15 @@ class VmController(
 
     suspend fun forceStopVm() {
         lifecycleMutex.withLock {
-            activeEngine?.forceStop()
+            val engine = activeEngine
+            if (engine == null) {
+                stopWithoutEngine()
+                return
+            }
+            engine.forceStop()
+            // The engine kills what it started; this catches anything that
+            // outlived it, so a forced stop always leaves a clean slate.
+            guestProcessReaper.killAllGuestProcesses()
         }
     }
 
@@ -201,12 +246,18 @@ class VmController(
     fun readBootLog(): String = (activeEngine as? QemuVmEngine)?.readSerialLog() ?: ""
 
     /**
-     * Engine choice: honour the user's explicit override, otherwise take the
-     * best available according to [EngineSelector]. Fails with the collected
-     * per-engine reasons so the user sees exactly why nothing can run.
+     * Engine choice. A rootfs image decides for itself — only PRoot can run
+     * a directory tree, whatever the override says. Otherwise honour the
+     * user's explicit override, then fall back to the best available engine.
+     * Fails with the collected per-engine reasons so the user sees exactly
+     * why nothing can run.
      */
     private fun createEngineFor(config: VmConfig): VirtualizationEngine {
         val capabilities = capabilityProbe.probe()
+        if (config.runsInProotContainer) {
+            requireProotUsable(capabilities)
+            return instantiate(EngineKind.PROOT)
+        }
         val chosenKind = when (config.engineOverride) {
             EngineOverride.FORCE_KVM -> EngineKind.QEMU_KVM
             EngineOverride.FORCE_TCG -> EngineKind.QEMU_TCG
@@ -215,6 +266,18 @@ class VmController(
                 ?: throw LxdError.NoEngineAvailable(describeUnavailability(capabilities))
         }
         return instantiate(chosenKind)
+    }
+
+    private fun requireProotUsable(capabilities: DeviceCapabilities) {
+        val verdict = EngineSelector.rank(capabilities)
+            .first { it.kind == EngineKind.PROOT }
+            .availability
+        if (verdict is EngineAvailability.Unavailable) {
+            throw LxdError.NoEngineAvailable(
+                "the selected image needs the PRoot container, " +
+                    "which cannot run here: ${verdict.reason}"
+            )
+        }
     }
 
     private fun instantiate(kind: EngineKind): VirtualizationEngine = when (kind) {
@@ -242,10 +305,10 @@ class VmController(
 
     private fun describeUnavailability(capabilities: DeviceCapabilities): String =
         EngineSelector.rank(capabilities).joinToString("; ") { candidate ->
-            val verdict = candidate.availability
-            val reason = if (verdict is com.crunzex.linuxondex.engine.EngineAvailability.Unavailable) {
-                verdict.reason
-            } else "available"
+            val reason = when (val verdict = candidate.availability) {
+                is EngineAvailability.Unavailable -> verdict.reason
+                EngineAvailability.Available -> "available"
+            }
             "${candidate.kind.name}: $reason"
         }
 

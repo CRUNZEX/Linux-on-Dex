@@ -4,7 +4,7 @@
 
 **Run a Linux VM with a full Linux server and desktop on your Android phone. No root.**
 
-A real Linux VM with its own kernel - not a chroot or proot trick - so **Podman, Docker and LXC** work exactly like they do on a server, with multiple Linux distros to choose from.
+A real Linux VM with its own kernel - so **Podman, Docker and LXC** work exactly like they do on a server, with multiple Linux distros to choose from. And when smoothness matters more than a kernel, the **Ubuntu GNOME desktop container** runs through PRoot at native CPU speed - git, SSH and VS Code preinstalled.
 
 [![Release](https://img.shields.io/github/v/release/CRUNZEX/linux-on-dex?include_prereleases&style=flat-square&label=release&color=blue)](https://github.com/CRUNZEX/linux-on-dex/releases)
 [![Stars](https://img.shields.io/github/stars/CRUNZEX/linux-on-dex?style=flat-square&color=yellow)](https://github.com/CRUNZEX/linux-on-dex/stargazers)
@@ -28,12 +28,13 @@ A real Linux VM with its own kernel - not a chroot or proot trick - so **Podman,
 - **A real VM** - Linux on a custom kernel via QEMU, or hardware-accelerated on supported KVM devices
 - **In-app terminal** - a real terminal emulator with an extra key row, copy and paste, and live resize
 - **GUI Linux support** - run a full XFCE or GNOME desktop in the built-in viewer
+- **Native-speed GNOME desktop** - an Ubuntu desktop container on PRoot: no emulation, with git, SSH and VS Code ready to use
 - **Network port forwarding** - map phone ports to VM ports, applied live while the VM runs
 
 ## Quick Setup
 
 1. [Download the APK](https://github.com/CRUNZEX/linux-on-dex/releases/latest) and install it.
-2. [Download a ready-made VM file](https://github.com/CRUNZEX/linux-on-dex/releases/latest) (`*.qcow2`) for the Linux you want, then import it in the app.
+2. [Download a ready-made image](https://github.com/CRUNZEX/linux-on-dex/releases/latest) - a `*.qcow2` VM disk, or the `*.rootfs.tar.gz` GNOME desktop container - then import it in the app.
 3. Adjust the specs to your liking - processors, memory, disk, display.
 4. Tap **Start Linux**.
 

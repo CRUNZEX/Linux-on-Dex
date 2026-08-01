@@ -157,6 +157,9 @@ class RfbClient(
             RfbProtocol.ENCODING_COPY_RECT,
             RfbProtocol.ENCODING_RAW,
             RfbProtocol.ENCODING_DESKTOP_SIZE,
+            // Keeps the guest's pointer out of the picture: see
+            // [RfbProtocol.ENCODING_CURSOR].
+            RfbProtocol.ENCODING_CURSOR,
         )
         output.writeByte(RfbProtocol.CLIENT_SET_ENCODINGS)
         output.writeByte(0)
@@ -198,11 +201,30 @@ class RfbClient(
                 RfbProtocol.ENCODING_RAW -> applyRawRect(x, y, width, height)
                 RfbProtocol.ENCODING_COPY_RECT -> applyCopyRect(x, y, width, height)
                 RfbProtocol.ENCODING_DESKTOP_SIZE -> { replaceFramebuffer(width, height); 0 }
+                RfbProtocol.ENCODING_CURSOR -> discardCursorSprite(x, y, width, height)
                 else -> throw IOException("server sent unrequested encoding $encoding")
             }
         }
         statistics.recordFrame(frameBytes, monotonicMillis())
         listener.onFrameUpdated()
+    }
+
+    /**
+     * Consumes a pointer-sprite rectangle and draws nothing.
+     *
+     * The sprite is requested precisely so the server stops drawing the
+     * pointer into the framebuffer; the app then deliberately does not draw
+     * it either. Touch input acts where the finger lands, so a second,
+     * lagging arrow on screen would only ever be misleading.
+     *
+     * The payload must still be read in full: its length is implied by the
+     * rectangle size rather than stated, so leaving bytes behind would
+     * desynchronise every following rectangle.
+     */
+    private fun discardCursorSprite(x: Int, y: Int, width: Int, height: Int): Int {
+        val byteCount = RfbProtocol.cursorRectangleByteCount(width, height)
+        if (byteCount > 0) input.readFully(rawScratch(byteCount), 0, byteCount)
+        return 0 // not a frame update: nothing on screen changed
     }
 
     /** Reads and applies one RAW rect; returns the pixel-byte count read. */
