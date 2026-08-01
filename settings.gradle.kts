@@ -22,3 +22,11 @@ dependencyResolutionManagement {
 
 rootProject.name = "linux-on-dex"
 include(":app")
+include(":terminal-emulator")
+include(":terminal-view")
+
+// These small build adapters compile the upstream sources directly from the
+// Termux submodule. Keeping the Gradle glue outside the submodule means an
+// update remains a normal `git submodule update --remote` with no local edits.
+project(":terminal-emulator").projectDir = file("termux-compat/terminal-emulator")
+project(":terminal-view").projectDir = file("termux-compat/terminal-view")

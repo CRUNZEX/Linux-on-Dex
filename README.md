@@ -26,7 +26,7 @@ A real Linux VM with its own kernel - not a chroot or proot trick - so **Podman,
 - **Multiple Linux distros** - Ubuntu, Debian, Kali and Alpine
 - **Podman, Docker and LXC** - pre-installed and ready the moment the Alpine image boots
 - **A real VM** - Linux on a custom kernel via QEMU, or hardware-accelerated on supported KVM devices
-- **In-app terminal** - a real terminal emulator with an extra key row, copy and paste, and live resize
+- **In-app terminal** - Termux terminal-view with JetBrains Mono Nerd Font, an extra key row, keyboard toggle, copy and paste, and live resize
 - **GUI Linux support** - run a full XFCE or GNOME desktop in the built-in viewer
 - **Network port forwarding** - map phone ports to VM ports, applied live while the VM runs
 
@@ -36,6 +36,19 @@ A real Linux VM with its own kernel - not a chroot or proot trick - so **Podman,
 2. [Download a ready-made VM file](https://github.com/CRUNZEX/linux-on-dex/releases/latest) (`*.qcow2`) for the Linux you want, then import it in the app.
 3. Adjust the specs to your liking - processors, memory, disk, display.
 4. Tap **Start Linux**.
+
+## Development
+
+Clone with submodules so the Termux terminal libraries are available:
+
+```sh
+git clone --recurse-submodules https://github.com/CRUNZEX/linux-on-dex.git
+```
+
+For an existing checkout, run `git submodule update --init --recursive` before
+building. The app compiles Termux's `terminal-emulator` and `terminal-view`
+sources from `third_party/termux-app`; it does not embed or launch the Termux
+application itself.
 
 ## License
 

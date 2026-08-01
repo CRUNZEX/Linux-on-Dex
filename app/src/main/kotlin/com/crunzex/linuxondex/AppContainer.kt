@@ -91,7 +91,9 @@ class AppContainer(context: Context) {
      * by several windows (in-app screen, popped-out DeX window).
      */
     val terminalSessions: List<TerminalSession> by lazy {
-        List(TERMINAL_WINDOW_COUNT) { index -> TerminalSession(vmController, consoleIndex = index) }
+        List(TERMINAL_WINDOW_COUNT) { index ->
+            TerminalSession(vmController, consoleIndex = index, appContext = appContext)
+        }
     }
 
     /** The main terminal, shown by the in-app Terminal screen. */

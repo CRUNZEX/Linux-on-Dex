@@ -1,5 +1,6 @@
 package com.crunzex.linuxondex.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -116,11 +118,16 @@ class VmService : Service() {
 
     private fun promoteToForeground(text: String) {
         createNotificationChannel()
-        startForeground(
-            NOTIFICATION_ID,
-            buildNotification(text),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-        )
+        val notification = buildNotification(text)
+        val serviceType = foregroundServiceTypeForSdk(Build.VERSION.SDK_INT)
+        if (serviceType == null) {
+            // specialUse was introduced in Android 14. Passing its inlined
+            // bit to Android 13 makes startForeground() reject the service
+            // before the VM controller can transition out of Idle.
+            startForeground(NOTIFICATION_ID, notification)
+        } else {
+            startForeground(NOTIFICATION_ID, notification, serviceType)
+        }
     }
 
     private fun buildNotification(text: String): Notification {
@@ -187,6 +194,14 @@ class VmService : Service() {
         private const val WAKE_LOCK_TAG = "LinuxOnDex:vm"
         private const val ACTION_START_VM = "com.crunzex.linuxondex.action.START_VM"
         private const val ACTION_STOP_VM = "com.crunzex.linuxondex.action.STOP_VM"
+
+        @SuppressLint("InlinedApi") // Access is returned only for API 34+.
+        internal fun foregroundServiceTypeForSdk(sdkInt: Int): Int? =
+            if (sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                null
+            }
 
         fun requestStart(context: Context) {
             val intent = Intent(context, VmService::class.java).setAction(ACTION_START_VM)
