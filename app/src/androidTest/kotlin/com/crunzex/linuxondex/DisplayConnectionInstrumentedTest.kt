@@ -124,6 +124,7 @@ class DisplayConnectionInstrumentedTest {
                 streams.output.write(byteArrayOf(0, 0, 0))
                 streams.output.writeInt(-EXTENDED_CLIPBOARD_PAYLOAD.size)
                 streams.output.write(EXTENDED_CLIPBOARD_PAYLOAD)
+                sendAlphaCursor(streams.output)
                 sendRawFrame(streams.output)
                 streams.output.flush()
             }
@@ -174,13 +175,18 @@ class DisplayConnectionInstrumentedTest {
 
         private fun readClientSetup(input: DataInputStream) {
             var framebufferRequested = false
+            var alphaCursorRequested = false
             while (!framebufferRequested) {
                 when (val messageType = input.readUnsignedByte()) {
                     RfbProtocol.CLIENT_SET_PIXEL_FORMAT -> discardFully(input, 19)
                     RfbProtocol.CLIENT_SET_ENCODINGS -> {
                         input.readUnsignedByte() // padding
                         val encodingCount = input.readUnsignedShort()
-                        discardFully(input, encodingCount * Int.SIZE_BYTES)
+                        repeat(encodingCount) {
+                            if (input.readInt() == RfbProtocol.ENCODING_ALPHA_CURSOR) {
+                                alphaCursorRequested = true
+                            }
+                        }
                     }
                     RfbProtocol.CLIENT_FRAMEBUFFER_UPDATE_REQUEST -> {
                         discardFully(input, 9)
@@ -189,6 +195,7 @@ class DisplayConnectionInstrumentedTest {
                     else -> throw AssertionError("unexpected setup message $messageType")
                 }
             }
+            assertTrue("client must request QEMU's safe alpha cursor", alphaCursorRequested)
         }
 
         private fun sendServerInit(output: DataOutputStream) {
@@ -221,6 +228,23 @@ class DisplayConnectionInstrumentedTest {
             }
         }
 
+        private fun sendAlphaCursor(output: DataOutputStream) {
+            output.writeByte(RfbProtocol.SERVER_FRAMEBUFFER_UPDATE)
+            output.writeByte(0)
+            output.writeShort(1)
+            output.writeShort(1) // hotspot x
+            output.writeShort(2) // hotspot y
+            output.writeShort(CURSOR_WIDTH)
+            output.writeShort(CURSOR_HEIGHT)
+            output.writeInt(RfbProtocol.ENCODING_ALPHA_CURSOR)
+            output.writeInt(RfbProtocol.ENCODING_RAW)
+            repeat(CURSOR_WIDTH * CURSOR_HEIGHT) {
+                // Begin each pixel with the byte from the real failure. If the
+                // client under-reads this payload, it will reproduce message 16.
+                output.writeInt(0x10FFFFFF)
+            }
+        }
+
         override fun close() {
             runCatching { serverSocket.close() }
             worker.join(WORKER_JOIN_MILLIS)
@@ -235,8 +259,10 @@ class DisplayConnectionInstrumentedTest {
     companion object {
         private const val FRAME_WIDTH = 64
         private const val FRAME_HEIGHT = 48
-        private const val EXPECTED_FRAME_COUNT = 2
+        private const val EXPECTED_FRAME_COUNT = 3
         private const val EXPECTED_POINTER_EVENT_COUNT = 2
+        private const val CURSOR_WIDTH = 16
+        private const val CURSOR_HEIGHT = 16
         private const val TEST_TIMEOUT_SECONDS = 10L
         private const val SOCKET_TIMEOUT_MILLIS = 10_000
         private const val WORKER_JOIN_MILLIS = 2_000L

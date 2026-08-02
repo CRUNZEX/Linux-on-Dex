@@ -35,7 +35,7 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
-RELEASE_VERSION = "1.1.11"
+RELEASE_VERSION = "1.1.12"
 
 
 @dataclass(frozen=True)
@@ -656,13 +656,68 @@ while [ ! -S /tmp/.X11-unix/X1 ]; do
     sleep 0.1
 done
 
+GNOME_SESSION_PID=""
+
+stop_desktop_children() {
+    if [ -n "$GNOME_SESSION_PID" ]; then
+        kill "$GNOME_SESSION_PID" 2>/dev/null || true
+        wait "$GNOME_SESSION_PID" 2>/dev/null || true
+        GNOME_SESSION_PID=""
+    fi
+    kill "$XVNC_PID" 2>/dev/null || true
+    wait "$XVNC_PID" 2>/dev/null || true
+}
+
+handle_shutdown_signal() {
+    log "shutdown requested; stopping GNOME and Xvnc"
+    stop_desktop_children
+    exit 0
+}
+
+trap handle_shutdown_signal HUP INT TERM
+
 log "starting the native GNOME Shell X11 session"
-# GNOME Shell is the real desktop and Mutter is its window manager. Launch it
-# directly: gnome-session's recovery screen treats any optional helper that
-# cannot use logind/systemd inside PRoot as a fatal desktop failure.
-exec dbus-run-session -- sh -c '\
-    /usr/libexec/gsd-xsettings >/tmp/gsd-xsettings.log 2>&1 & \
-    exec gnome-shell --x11 >/tmp/gnome-shell.log 2>&1'
+# Xvnc is the stable session leader. GNOME Shell and Mutter may exit when a
+# heavy Electron/browser workload exhausts a renderer or when Android kills a
+# phantom child. Restarting just the desktop session preserves VNC, SSH, open
+# terminal connections and the extracted rootfs instead of taking the entire
+# PRoot container down with one component.
+restart_attempt=0
+while kill -0 "$XVNC_PID" 2>/dev/null; do
+    session_started_at=$(date +%s)
+    dbus-run-session -- sh -c '\
+        /usr/libexec/gsd-xsettings >>/tmp/gsd-xsettings.log 2>&1 & \
+        exec gnome-shell --x11 >>/tmp/gnome-shell.log 2>&1' &
+    GNOME_SESSION_PID=$!
+
+    wait "$GNOME_SESSION_PID"
+    session_exit_code=$?
+    GNOME_SESSION_PID=""
+
+    if ! kill -0 "$XVNC_PID" 2>/dev/null; then
+        log "Xvnc exited while GNOME was running"
+        exit 1
+    fi
+    if [ "$session_exit_code" -eq 0 ]; then
+        log "GNOME session ended cleanly"
+        stop_desktop_children
+        exit 0
+    fi
+
+    session_runtime=$(( $(date +%s) - session_started_at ))
+    if [ "$session_runtime" -ge 60 ]; then
+        restart_attempt=1
+    else
+        restart_attempt=$((restart_attempt + 1))
+    fi
+    restart_delay=$restart_attempt
+    if [ "$restart_delay" -gt 10 ]; then restart_delay=10; fi
+    log "GNOME exited with code $session_exit_code; restarting in ${restart_delay}s"
+    sleep "$restart_delay"
+done
+
+log "Xvnc stopped unexpectedly"
+exit 1
 """
 
 VSCODE_WRAPPER_SCRIPT = r"""#!/bin/sh
@@ -678,6 +733,7 @@ exec /usr/share/code/code \
     --disable-gpu \
     --disable-dev-shm-usage \
     --disable-crash-reporter \
+    --renderer-process-limit=2 \
     --disable-features=CalculateNativeWinOcclusion,UseChromeOSDirectVideoDecoder \
     --password-store=basic \
     "$@"

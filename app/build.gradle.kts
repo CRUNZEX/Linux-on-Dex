@@ -17,8 +17,8 @@ android {
         targetSdk = 36
         // versionCode keeps counting from the 0.x/2.x builds so devices that
         // already have the app update in place — Android forbids downgrading it.
-        versionCode = 36
-        versionName = "1.1.11"
+        versionCode = 37
+        versionName = "1.1.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -99,8 +99,19 @@ class ProotGnomeArtifactTest {
                     "then printf 'FIREFOX_' && printf 'STATUS=INSTALLED\\n'; fi; " +
                     "if grep -q 'MAX_FRAME_RATE=240' /usr/local/bin/dex-desktop; " +
                     "then printf 'FPS_' && printf 'STATUS=240\\n'; fi; " +
-                    "grep -q '1.1.11' /etc/linux-on-dex-release && " +
-                    "printf 'RELEASE_' && printf 'VERSION=1.1.11\\n'; " +
+                    "grep -q '1.1.12' /etc/linux-on-dex-release && " +
+                    "printf 'RELEASE_' && printf 'VERSION=1.1.12\\n'; " +
+                    "old_shell=\$(pgrep -x gnome-shell | head -1); " +
+                    "old_xvnc=\$(pgrep -x Xtigervnc | head -1); " +
+                    "kill -KILL \"\$old_shell\"; " +
+                    "new_shell=''; for attempt in \$(seq 1 15); do " +
+                    "new_shell=\$(pgrep -x gnome-shell | head -1); " +
+                    "if test -n \"\$new_shell\" && test \"\$new_shell\" != \"\$old_shell\"; " +
+                    "then break; fi; sleep 1; done; " +
+                    "new_xvnc=\$(pgrep -x Xtigervnc | head -1); " +
+                    "if test -n \"\$new_shell\" && test \"\$new_shell\" != \"\$old_shell\" && " +
+                    "test \"\$new_xvnc\" = \"\$old_xvnc\"; " +
+                    "then printf 'RECOVERY_' && printf 'STATUS=GNOME_RESTARTED_XVNC_STABLE\\n'; fi; " +
                     "printf 'GNOME_' && printf 'ARTIFACT_OK\\n'\n"
             it.write(command.toByteArray())
             val output = readUntil(it, "GNOME_ARTIFACT_OK", CONSOLE_TIMEOUT_MILLIS)
@@ -111,7 +122,11 @@ class ProotGnomeArtifactTest {
             assertTrue("VS Code is missing: $output", output.contains("CODE_STATUS=INSTALLED"))
             assertTrue("Firefox is missing: $output", output.contains("FIREFOX_STATUS=INSTALLED"))
             assertTrue("VNC is not capped at 240 FPS: $output", output.contains("FPS_STATUS=240"))
-            assertTrue("release metadata is stale: $output", output.contains("RELEASE_VERSION=1.1.11"))
+            assertTrue("release metadata is stale: $output", output.contains("RELEASE_VERSION=1.1.12"))
+            assertTrue(
+                "GNOME did not recover while preserving Xvnc: $output",
+                output.contains("RECOVERY_STATUS=GNOME_RESTARTED_XVNC_STABLE"),
+            )
         }
     }
 

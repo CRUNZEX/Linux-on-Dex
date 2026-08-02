@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 
 import proot_rootfs_builder as builder
@@ -16,6 +17,23 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         self.assertNotIn("gnome-panel", builder.GUEST_PACKAGES)
         self.assertNotIn("openbox", builder.GUEST_PACKAGES)
         self.assertNotIn("apt-get purge -y gvfs", rendered)
+
+    def test_xvnc_survives_and_restarts_a_crashed_gnome_session(self) -> None:
+        supervisor = builder.DESKTOP_SUPERVISOR_SCRIPT
+
+        self.assertIn('while kill -0 "$XVNC_PID"', supervisor)
+        self.assertIn('GNOME exited with code $session_exit_code', supervisor)
+        self.assertIn("trap handle_shutdown_signal HUP INT TERM", supervisor)
+        self.assertNotIn("exec dbus-run-session", supervisor)
+        self.assertIn("--renderer-process-limit=2", builder.VSCODE_WRAPPER_SCRIPT)
+        syntax_check = subprocess.run(
+            ["sh", "-n"],
+            input=supervisor,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, syntax_check.returncode, syntax_check.stderr)
 
     def test_firefox_uses_verified_mozilla_deb_and_proot_wrapper(self) -> None:
         rendered = builder._render_build_user_data("linuxondex")

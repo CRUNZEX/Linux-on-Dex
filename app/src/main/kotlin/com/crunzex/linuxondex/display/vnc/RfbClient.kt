@@ -172,6 +172,12 @@ class RfbClient(
             RfbProtocol.ENCODING_COPY_RECT,
             RfbProtocol.ENCODING_RAW,
             RfbProtocol.ENCODING_DESKTOP_SIZE,
+            // Prefer QEMU's fixed 32-bit cursor payload. QEMU 10.2 truncates
+            // RichCursor data after a 16-bit pixel-format negotiation, which
+            // corrupts the next RFB message when a guest application changes
+            // its pointer. TigerVNC ignores this extension and continues with
+            // the compatible RichCursor request below.
+            RfbProtocol.ENCODING_ALPHA_CURSOR,
             // Keeps the guest's pointer out of the picture: see
             // [RfbProtocol.ENCODING_CURSOR].
             RfbProtocol.ENCODING_CURSOR,
@@ -200,12 +206,6 @@ class RfbClient(
         discardFully(1) // padding
         val rectangleCount = input.readUnsignedShort()
 
-        // Ask for the next frame *before* decoding this one, so QEMU renders
-        // it while we work. Exactly one request stays outstanding, which
-        // overlaps server time with client decode instead of serialising the
-        // two — the single biggest win for a busy desktop.
-        requestFramebufferUpdate(incremental = true)
-
         var frameBytes = 0
         repeat(rectangleCount) {
             val x = input.readUnsignedShort()
@@ -216,12 +216,19 @@ class RfbClient(
                 RfbProtocol.ENCODING_RAW -> applyRawRect(x, y, width, height)
                 RfbProtocol.ENCODING_COPY_RECT -> applyCopyRect(x, y, width, height)
                 RfbProtocol.ENCODING_DESKTOP_SIZE -> { replaceFramebuffer(width, height); 0 }
+                RfbProtocol.ENCODING_ALPHA_CURSOR -> discardAlphaCursor(width, height)
                 RfbProtocol.ENCODING_CURSOR -> discardCursorSprite(x, y, width, height)
                 else -> throw IOException("server sent unrequested encoding $encoding")
             }
         }
         statistics.recordFrame(frameBytes, monotonicMillis())
         listener.onFrameUpdated()
+
+        // Do not write before consuming the complete frame. A server may send
+        // its final update and close immediately; an eager request then fails
+        // with Broken pipe and used to discard the valid pixels already in our
+        // input buffer. Delivery comes first, followed by exactly one request.
+        requestFramebufferUpdate(incremental = true)
     }
 
     /**
@@ -240,6 +247,24 @@ class RfbClient(
         val byteCount = RfbProtocol.cursorRectangleByteCount(width, height)
         if (byteCount > 0) input.readFully(rawScratch(byteCount), 0, byteCount)
         return 0 // not a frame update: nothing on screen changed
+    }
+
+    /**
+     * Consumes QEMU's alpha-cursor extension without drawing a second pointer.
+     * The nested encoding word must be RAW; accepting another value would make
+     * its payload length unknowable and silently desynchronise the connection.
+     */
+    private fun discardAlphaCursor(width: Int, height: Int): Int {
+        val nestedEncoding = input.readInt()
+        if (nestedEncoding != RfbProtocol.ENCODING_RAW) {
+            throw IOException("unsupported alpha cursor encoding $nestedEncoding")
+        }
+        val pixelByteCount = RfbProtocol.alphaCursorRectangleByteCount(width, height) -
+            Int.SIZE_BYTES
+        if (pixelByteCount > 0) {
+            input.readFully(rawScratch(pixelByteCount), 0, pixelByteCount)
+        }
+        return 0
     }
 
     /** Reads and applies one RAW rect; returns the pixel-byte count read. */

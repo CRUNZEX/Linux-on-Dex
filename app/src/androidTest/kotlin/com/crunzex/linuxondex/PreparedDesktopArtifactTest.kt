@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.time.Duration.Companion.seconds
 
-/** Boots the actual v1.1.10 qcow2 release artifacts under Android TCG. */
+/** Boots the actual v1.1.12 qcow2 release artifacts under Android TCG. */
 @RunWith(AndroidJUnit4::class)
 class PreparedDesktopArtifactTest {
 
@@ -125,15 +125,15 @@ class PreparedDesktopArtifactTest {
                         "then printf 'SESSION_' && printf 'PROCESS=ACTIVE\\n'; fi; " +
                         "if apt-config dump | grep -q 'Acquire::Queue-Mode.*access'; " +
                         "then printf 'APT_' && printf 'TUNING=ACTIVE\\n'; fi; " +
-                        "grep -q '1.1.10' /etc/linux-on-dex-release && " +
-                        "printf 'RELEASE_' && printf 'VERSION=1.1.10\\n'; " +
+                        "grep -q '1.1.12' /etc/linux-on-dex-release && " +
+                        "printf 'RELEASE_' && printf 'VERSION=1.1.12\\n'; " +
                         "printf 'DESKTOP_' && printf 'PROBE_DONE\\n'\n"
                 console.write(validationCommand.toByteArray())
                 val output = readUntil(console, "DESKTOP_PROBE_DONE", CONSOLE_PROBE_TIMEOUT_MILLIS)
                 assertTrue("display manager is inactive: $output", output.contains("DISPLAY_MANAGER=ACTIVE"))
                 assertTrue("$profileName session is inactive: $output", output.contains("SESSION_PROCESS=ACTIVE"))
                 assertTrue("apt tuning is missing: $output", output.contains("APT_TUNING=ACTIVE"))
-                assertTrue("release metadata is stale: $output", output.contains("RELEASE_VERSION=1.1.10"))
+                assertTrue("release metadata is stale: $output", output.contains("RELEASE_VERSION=1.1.12"))
             }
 
             val frame = waitForDesktopFrame(DESKTOP_FRAME_TIMEOUT_SECONDS)

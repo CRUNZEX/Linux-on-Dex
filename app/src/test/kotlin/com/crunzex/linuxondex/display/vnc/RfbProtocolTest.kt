@@ -41,6 +41,21 @@ class RfbProtocolTest {
     }
 
     @Test
+    fun `alpha cursor size includes encoding word and fixed argb pixels`() {
+        assertEquals(4 + 16 * 12 * 4, RfbProtocol.alphaCursorRectangleByteCount(16, 12))
+    }
+
+    @Test
+    fun `cursor payload calculations reject integer overflow`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            RfbProtocol.alphaCursorRectangleByteCount(Int.MAX_VALUE, Int.MAX_VALUE)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            RfbProtocol.cursorRectangleByteCount(Int.MAX_VALUE, Int.MAX_VALUE)
+        }
+    }
+
+    @Test
     fun `full intensity rgb565 decodes to exactly opaque white`() {
         // Bit replication, not a plain shift: 0xFFFF must be 0xFFFFFF, never
         // 0xF8FCF8, or every bright surface picks up a tint.
