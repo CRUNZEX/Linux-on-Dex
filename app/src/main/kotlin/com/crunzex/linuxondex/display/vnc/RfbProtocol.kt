@@ -16,6 +16,8 @@ object RfbProtocol {
     const val SERVER_SET_COLOURMAP = 1
     const val SERVER_BELL = 2
     const val SERVER_CUT_TEXT = 3
+    const val SERVER_END_CONTINUOUS_UPDATES = 150
+    const val SERVER_FENCE = 248
 
     // Client → server message types.
     const val CLIENT_SET_PIXEL_FORMAT = 0

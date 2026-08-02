@@ -20,6 +20,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+RELEASE_VERSION = "1.1.10"
+
+
 @dataclass(frozen=True)
 class DesktopBuildRequest:
     """Everything the desktop build needs, resolved by the caller."""
@@ -76,6 +79,8 @@ XFCE_PROFILE = DesktopProfile(
         "dbus-x11",
         "xserver-xorg-video-modesetting",
         "xserver-xorg-input-libinput",
+        "x11-utils",
+        "xdotool",
         "network-manager",
     ),
     display_manager="lightdm",
@@ -89,7 +94,6 @@ XFCE_PROFILE = DesktopProfile(
   # The cloud-init seed is attached as a disk on first boot; without this
   # XFCE puts a "CIDATA" icon on the desktop the user never asked for.
   - path: /home/{username}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml
-    owner: "{username}:{username}"
     permissions: "0644"
     content: |
       <?xml version="1.0" encoding="UTF-8"?>
@@ -107,7 +111,6 @@ XFCE_PROFILE = DesktopProfile(
   # software GL. Without compositing, windows draw directly — the single
   # biggest smoothness win a software VM can get.
   - path: /home/{username}/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
-    owner: "{username}:{username}"
     permissions: "0644"
     content: |
       <?xml version="1.0" encoding="UTF-8"?>
@@ -117,25 +120,39 @@ XFCE_PROFILE = DesktopProfile(
         </property>
       </channel>
 """,
-    extra_runcmd="""  - [chown, "-R", "{username}:{username}", "/home/{username}/.config"]
+    extra_runcmd="""  - |
+    set -e
+    # cloud-init's write_files module creates parent directories as root.
+    # LightDM must be able to create .Xauthority in the account's home or it
+    # silently falls back to the greeter instead of starting XFCE.
+    chown -R "{username}:{username}" "/home/{username}"
+    test "$(stat -c %U "/home/{username}")" = "{username}"
+    runuser -u "{username}" -- touch "/home/{username}/.linux-on-dex-write-test"
+    rm -f "/home/{username}/.linux-on-dex-write-test"
+    test -f /usr/share/xsessions/xfce.desktop
+    lightdm --show-config >/run/linux-on-dex-lightdm.conf
+    printf 'DEX_DESKTOP_PROFILE_VALIDATED=xfce\\n' >/dev/ttyAMA0
 """,
 )
 
-# GNOME: the full Ubuntu desktop. Heavier — GNOME Shell renders through
-# software GL (llvmpipe) with no GPU on the phone — so every tunable that
-# reduces per-frame work is applied: Xorg instead of Wayland (Wayland +
-# llvmpipe is far worse), animations off, and the file-indexing miners that
-# would otherwise churn the CPU are masked.
+# GNOME Flashback: GNOME Panel and settings with Metacity instead of Mutter.
+# QEMU's Android headless build exposes a 2D virtio framebuffer but no usable
+# EGL display backend, so GNOME Shell would composite every frame in llvmpipe.
+# Flashback remains a GNOME desktop and is substantially more responsive.
 GNOME_PROFILE = DesktopProfile(
     key="gnome",
     packages=(
-        "gnome-shell",
+        "gnome-session-flashback",
+        "gnome-flashback",
+        "gnome-panel",
+        "metacity",
         "gdm3",
         "gnome-terminal",
         "nautilus",
         "gnome-control-center",
-        "gnome-shell-extension-prefs",
         "xserver-xorg",
+        "x11-utils",
+        "xdotool",
         "dbus-x11",
         "network-manager",
         "fonts-ubuntu",
@@ -151,7 +168,7 @@ GNOME_PROFILE = DesktopProfile(
     permissions: "0644"
     content: |
       [daemon]
-      # llvmpipe makes GNOME Shell under Wayland painfully slow; force Xorg.
+      # QEMU VNC captures Xorg's framebuffer directly.
       WaylandEnable=false
       AutomaticLoginEnable=true
       AutomaticLogin={username}
@@ -159,12 +176,10 @@ GNOME_PROFILE = DesktopProfile(
     permissions: "0600"
     content: |
       [User]
-      # Force the Xorg session. Under software GL, GNOME on Wayland does not
-      # scan out to QEMU's emulated display (the screen stays black), whereas
-      # Xorg drives virtio-gpu's plain framebuffer that VNC always captures.
-      # gnome-shell pulls ubuntu-session, so ubuntu-xorg.desktop is present.
-      Session=ubuntu-xorg
-      XSession=ubuntu-xorg
+      # This session is shipped by gnome-session-flashback and uses Metacity,
+      # avoiding both the black Mutter scanout and GNOME Shell's fail-whale.
+      Session=gnome-flashback-metacity
+      XSession=gnome-flashback-metacity
       SystemAccount=false
   # System-wide dconf defaults: no animations, no first-run wizard, and the
   # dark theme most people expect from Ubuntu.
@@ -194,35 +209,29 @@ GNOME_PROFILE = DesktopProfile(
       primary-color='#242430'
       [org/gnome/desktop/search-providers]
       disable-external=true
-      [org/gnome/mutter]
-      # No GPU: skip the overlay-scaling work the compositor would attempt.
-      # An empty array needs its type spelled out or `dconf update` refuses
-      # the whole database — which fails ibus's postinst and with it the
-      # entire desktop install.
-      experimental-features=@as []
-      [org/gnome/shell]
-      disable-user-extensions=false
-  # GTK4 apps (nautilus, text editor, settings) default to a GL renderer,
-  # which lands on llvmpipe here. Cairo software rendering is faster than
-  # software GL, so make it the system default.
-  - path: /etc/environment.d/90-linux-on-dex-render.conf
-    permissions: "0644"
-    content: |
-      GSK_RENDERER=cairo
 """,
     extra_runcmd="""  - [dconf, update]
   # File-indexing miners are pure overhead on a phone VM.
   - [systemctl, "--global", mask, "tracker-miner-fs-3.service", "tracker-extract-3.service", "tracker-miner-rss-3.service", "tracker-miner-fs-control-3.service"]
   # The autologin account should never see the first-run setup wizard.
   - [apt-get, purge, "-y", gnome-initial-setup]
+  - |
+    set -e
+    test -f /usr/share/xsessions/gnome-flashback-metacity.desktop
+    test -x /usr/bin/gnome-flashback
+    test -x /usr/bin/gnome-panel
+    test -x /usr/bin/metacity
+    printf 'DEX_DESKTOP_PROFILE_VALIDATED=gnome\\n' >/dev/ttyAMA0
 """,
 )
 
 DESKTOP_PROFILES = {profile.key: profile for profile in (XFCE_PROFILE, GNOME_PROFILE)}
 
-# Must match the app's generated seed, so cloud-init recognises the machine
-# as one it has already configured and does not redo the work on the phone.
-INSTANCE_ID = "linux-on-dex-001"
+# A bake seed must never reuse an instance id: cloud-image caches can retain
+# cloud-init state, and a repeated id makes a rebuild silently skip its whole
+# package/runcmd payload. The finished guest disables cloud-init before export,
+# so the app's later seed identity cannot rerun this one-shot configuration.
+BUILD_INSTANCE_ID_PREFIX = "linux-on-dex-desktop-build"
 
 
 def log(message: str) -> None:
@@ -270,10 +279,13 @@ def _write_build_seed(seed_iso: Path, request: DesktopBuildRequest) -> None:
     """Writes the one-shot cloud-init seed that performs the install."""
     from build_ready_vm import build_seed_iso_from_documents  # local import: same tools dir
 
+    build_instance_id = (
+        f"{BUILD_INSTANCE_ID_PREFIX}-{request.profile.key}-{time.time_ns()}"
+    )
     build_seed_iso_from_documents(
         output_iso=seed_iso,
         user_data=_render_build_user_data(request),
-        meta_data=f"instance-id: {INSTANCE_ID}\nlocal-hostname: dex\n",
+        meta_data=f"instance-id: {build_instance_id}\nlocal-hostname: dex\n",
     )
 
 
@@ -314,6 +326,33 @@ packages:
 
 write_files:
 {profile_write_files}  # The app's Terminal screen reads this serial port.
+  - path: /etc/linux-on-dex-release
+    permissions: "0644"
+    content: |
+      Linux on DeX {RELEASE_VERSION} Ubuntu 24.04 {profile.key}
+  # The Android QEMU payload is headless and has no EGL display backend for
+  # virtio-gpu-gl. Keep 2D drawing predictable and bound llvmpipe to the four
+  # vCPUs the app configures by default.
+  - path: /etc/environment.d/90-linux-on-dex-render.conf
+    permissions: "0644"
+    content: |
+      LIBGL_ALWAYS_SOFTWARE=1
+      GALLIUM_DRIVER=llvmpipe
+      LP_NUM_THREADS=4
+      GSK_RENDERER=cairo
+      QT_XCB_GL_INTEGRATION=none
+  # Keep package downloads bounded and avoid translated indexes that are not
+  # used by this English-only appliance image.
+  - path: /etc/apt/apt.conf.d/99-linux-on-dex
+    permissions: "0644"
+    content: |
+      Acquire::Queue-Mode "access";
+      Acquire::http::Pipeline-Depth "0";
+      Acquire::Retries "3";
+      Acquire::http::Timeout "30";
+      Acquire::https::Timeout "30";
+      Acquire::Languages "none";
+      Dpkg::Use-Pty "0";
   # TERM=xterm-256color: the app ships a real terminal emulator, and vt220
   # (systemd's serial default) would strip it down to monochrome.
   - path: /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf
@@ -395,9 +434,25 @@ runcmd:
   - [groupadd, -f, autologin]
   - [groupadd, -f, nopasswdlogin]
   - [usermod, -aG, "autologin,nopasswdlogin", {username}]
-  # Extra terminal windows: a getty per virtio console.
+  # `write_files` runs before the final package/user setup on some cloud-init
+  # versions. Never export an image when one failed write silently prevented
+  # all later runtime configuration from being created.
+  - |
+    set -e
+    test -f /etc/linux-on-dex-release
+    test -f /etc/environment.d/90-linux-on-dex-render.conf
+    test -f /etc/apt/apt.conf.d/99-linux-on-dex
+    test -f /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf
+    test -f /etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf
+    test -f /etc/systemd/system/serial-getty@hvc1.service.d/autologin.conf
+    echo DEX_DESKTOP_COMMON_VALIDATED=1 >/dev/ttyAMA0
+  # Reload the drop-ins before touching any getty. ttyAMA0 is the built-in
+  # Terminal and hvc0/hvc1 back additional terminal windows.
+  - [systemctl, daemon-reload]
+  - [sh, -c, "systemctl enable serial-getty@ttyAMA0.service 2>/dev/null || true"]
   - [sh, -c, "systemctl enable serial-getty@hvc0.service 2>/dev/null || true"]
   - [sh, -c, "systemctl enable serial-getty@hvc1.service 2>/dev/null || true"]
+  - [sh, -c, "systemctl restart serial-getty@ttyAMA0.service 2>/dev/null || true"]
   - [sh, -c, "systemctl restart serial-getty@hvc0.service 2>/dev/null || true"]
   - [sh, -c, "systemctl restart serial-getty@hvc1.service 2>/dev/null || true"]
   # Pick up the public-resolver drop-in written above.
@@ -418,7 +473,8 @@ runcmd:
   - [systemctl, enable, {profile.display_manager}.service]
   # Shrink what the finished image has to carry.
   - [apt-get, clean]
-  - [sh, -c, "rm -rf /var/lib/apt/lists/*"]
+  # Keep current package lists: the first `apt update` can then use conditional
+  # requests instead of downloading every index from scratch.
   - [sh, -c, "fstrim -av || true"]
   # Everything cloud-init had to do is baked in now. Without this flag it
   # would still run all its stages on every phone boot — pure start-up cost.
@@ -511,6 +567,18 @@ def _require_install_succeeded(process: subprocess.Popen, console_log: Path) -> 
             "cloud-init did not report a successful desktop build.\n"
             f"Console tail:\n{tail}"
         )
+    if "DEX_DESKTOP_PROFILE_VALIDATED=" not in console_text:
+        tail = console_text[-1500:] if console_text else "(console log empty)"
+        raise DesktopBuildError(
+            "the selected desktop session or autologin configuration failed validation.\n"
+            f"Console tail:\n{tail}"
+        )
+    if "DEX_DESKTOP_COMMON_VALIDATED=1" not in console_text:
+        tail = console_text[-1500:] if console_text else "(console log empty)"
+        raise DesktopBuildError(
+            "shared desktop runtime files failed validation.\n"
+            f"Console tail:\n{tail}"
+        )
     if process.returncode not in (0, None):
         raise DesktopBuildError(f"QEMU exited with code {process.returncode}")
 
@@ -521,7 +589,18 @@ def _compact_into_output(qemu_img: str, staging_disk: Path, output_disk: Path) -
     output_disk.parent.mkdir(parents=True, exist_ok=True)
     output_disk.unlink(missing_ok=True)
     _run_checked(
-        [qemu_img, "convert", "-O", "qcow2", str(staging_disk), str(output_disk)],
+        [
+            qemu_img,
+            "convert",
+            "-p",
+            "-c",
+            "-O",
+            "qcow2",
+            "-o",
+            "compat=1.1,compression_type=zlib",
+            str(staging_disk),
+            str(output_disk),
+        ],
         failure_message="compacting the finished image",
     )
 

@@ -40,6 +40,7 @@ class VmPaths(
     val qemuImgBinary: File = nativeLibraryDir.resolve("libqemu-img.so")
     val prootBinary: File = nativeLibraryDir.resolve("libproot.so")
     val prootLoaderBinary: File = nativeLibraryDir.resolve("libproot-loader.so")
+    val virglRendererBinary: File = nativeLibraryDir.resolve("libvirgl-test-server-android.so")
 
     val vmRootDir: File = filesDir.resolve("vm")
     val qemuDataDir: File = vmRootDir.resolve("qemu")
@@ -64,6 +65,7 @@ class VmPaths(
     val prootSharedMemoryDir: File = vmRootDir.resolve("proot-shm")
 
     val socketsDir: File = vmRootDir.resolve("sockets")
+    val virglSocket: File = socketsDir.resolve("virgl-renderer.sock")
     val logsDir: File = vmRootDir.resolve("logs")
     val tmpDir: File = cacheDir.resolve("vm-tmp")
 

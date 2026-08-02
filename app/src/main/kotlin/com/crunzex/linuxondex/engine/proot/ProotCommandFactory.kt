@@ -23,11 +23,12 @@ object ProotCommandFactory {
         displayResolution: String,
         vncPort: Int,
         sharedFolderDir: File?,
+        graphicsBridgeEnabled: Boolean = false,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
-        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir) +
+        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
             listOf(DESKTOP_SUPERVISOR_GUEST_PATH),
-        environment = guestEnvironment(paths) + mapOf(
+        environment = guestEnvironment(paths, graphicsBridgeEnabled) + mapOf(
             "DEX_RESOLUTION" to displayResolution,
             "DEX_VNC_PORT" to vncPort.toString(),
         ),
@@ -46,11 +47,12 @@ object ProotCommandFactory {
         paths: VmPaths,
         rootfsDir: File,
         sharedFolderDir: File?,
+        graphicsBridgeEnabled: Boolean = false,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
-        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir) +
+        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
             listOf(CONSOLE_SESSION_GUEST_PATH),
-        environment = guestEnvironment(paths),
+        environment = guestEnvironment(paths, graphicsBridgeEnabled),
         workingDirectory = paths.vmRootDir,
     )
 
@@ -66,11 +68,28 @@ object ProotCommandFactory {
         paths: VmPaths,
         rootfsDir: File,
         sharedFolderDir: File?,
+        graphicsBridgeEnabled: Boolean = false,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
-        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir) +
-            listOf("/usr/bin/script", "-q", "-c", "/bin/bash -l", "/dev/null"),
-        environment = guestEnvironment(paths),
+        arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
+            listOf("/usr/bin/script", "-q", "-c", INTERACTIVE_LOGIN_COMMAND, "/dev/null"),
+        environment = guestEnvironment(paths, graphicsBridgeEnabled),
+        workingDirectory = paths.vmRootDir,
+    )
+
+    /** Headless end-to-end probe: guest Mesa -> virpipe -> Android renderer. */
+    fun graphicsProbe(
+        paths: VmPaths,
+        rootfsDir: File,
+    ): NativeCommand = NativeCommand(
+        program = paths.prootBinary,
+        arguments = rootfsArguments(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            sharedFolderDir = null,
+            graphicsBridgeEnabled = true,
+        ) + listOf("/usr/bin/eglinfo", "-B", "-p", "surfaceless"),
+        environment = guestEnvironment(paths, graphicsBridgeEnabled = true),
         workingDirectory = paths.vmRootDir,
     )
 
@@ -110,6 +129,7 @@ object ProotCommandFactory {
         paths: VmPaths,
         rootfsDir: File,
         sharedFolderDir: File?,
+        graphicsBridgeEnabled: Boolean,
     ): List<String> {
         val arguments = mutableListOf(
             "--kill-on-exit",
@@ -127,6 +147,14 @@ object ProotCommandFactory {
             // Android's Files app — the natural way to move files in and out.
             arguments += listOf("-b", "${sharedFolderDir.absolutePath}:$SHARED_FOLDER_GUEST_PATH")
         }
+        if (graphicsBridgeEnabled) {
+            // Bind only the renderer socket, not the app's entire runtime
+            // directory. Mesa's vtest client sees its conventional path.
+            arguments += listOf(
+                "-b",
+                "${paths.virglSocket.absolutePath}:$VIRGL_SOCKET_GUEST_PATH",
+            )
+        }
         arguments += listOf("-w", "/root")
         return arguments
     }
@@ -136,8 +164,11 @@ object ProotCommandFactory {
      * is what a login on this rootfs should see. HOME must be the guest's
      * /root, overriding the host-side HOME used when spawning QEMU.
      */
-    private fun guestEnvironment(paths: VmPaths): Map<String, String> =
-        paths.processEnvironment() + mapOf(
+    private fun guestEnvironment(
+        paths: VmPaths,
+        graphicsBridgeEnabled: Boolean = false,
+    ): Map<String, String> {
+        val environment = paths.processEnvironment() + mapOf(
             // PROOT_* are read by PRoot itself, so they stay host paths.
             "PROOT_LOADER" to paths.prootLoaderBinary.absolutePath,
             "PROOT_TMP_DIR" to paths.tmpDir.absolutePath,
@@ -159,10 +190,31 @@ object ProotCommandFactory {
             "COLORTERM" to "truecolor",
             "LANG" to "C.UTF-8",
         )
+        if (!graphicsBridgeEnabled) return environment
+        return environment + mapOf(
+            "DEX_GPU_BRIDGE" to "1",
+            "GALLIUM_DRIVER" to "virpipe",
+            // Mesa categorises virpipe as a software winsys even though the
+            // server forwards its rendering to Android's hardware driver.
+            "LIBGL_ALWAYS_SOFTWARE" to "1",
+            // Negotiate a baseline the Android emulator and every target
+            // Galaxy support; asking for 3.2 crashes older EGL shims before
+            // virgl can report a capability set.
+            "MESA_GL_VERSION_OVERRIDE" to "3.3",
+            "MESA_GLES_VERSION_OVERRIDE" to "3.1",
+            "VTEST_SOCKET_NAME" to VIRGL_SOCKET_GUEST_PATH,
+        )
+    }
 
     const val DESKTOP_SUPERVISOR_GUEST_PATH = "/usr/local/bin/dex-desktop"
     const val CONSOLE_SESSION_GUEST_PATH = "/usr/local/bin/dex-session"
     const val SHARED_FOLDER_GUEST_PATH = "/root/shared"
+    const val VIRGL_SOCKET_GUEST_PATH = "/tmp/.virgl_test"
+
+    /** Names Android supplementary groups before bash or `groups` can warn. */
+    const val INTERACTIVE_LOGIN_COMMAND =
+        "if [ -x /usr/local/bin/dex-name-groups ]; then " +
+            "/usr/local/bin/dex-name-groups 2>/dev/null || true; fi; exec /bin/bash -l"
 
     /**
      * Debian and Ubuntu put some packaged programs in `games` directories,

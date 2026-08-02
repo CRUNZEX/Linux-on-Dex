@@ -5,8 +5,8 @@ import android.view.KeyEvent
 
 /**
  * Android [KeyEvent] → X11 keysym translation for the VNC KeyEvent message.
- * Printable characters use their Unicode value (valid keysym range for
- * Latin-1; QEMU maps the rest through its keymap tables).
+ * Printable Latin-1 characters use their value directly. Other Unicode
+ * characters use the X11 Unicode keysym form (`0x01000000 | codePoint`).
  */
 object VncKeyMap {
 
@@ -48,6 +48,21 @@ object VncKeyMap {
         val unicode = event.unicodeChar
         // Strip the combining-accent flag; ignore pure modifier state changes.
         val printable = unicode and KeyCharacterMap.COMBINING_ACCENT.inv()
-        return printable.takeIf { it in 0x20..0xFFFFFF }
+        return keysymForCodePoint(printable)
     }
+
+    /** Converts committed IME text to the X11 keysym carried by RFB. */
+    fun keysymForCodePoint(codePoint: Int): Int? = when {
+        codePoint == '\n'.code || codePoint == '\r'.code -> specialKeys[KeyEvent.KEYCODE_ENTER]
+        codePoint == '\t'.code -> specialKeys[KeyEvent.KEYCODE_TAB]
+        codePoint in ASCII_PRINTABLE_RANGE -> codePoint
+        codePoint in LATIN_1_PRINTABLE_RANGE -> codePoint
+        Character.isValidCodePoint(codePoint) && !Character.isISOControl(codePoint) ->
+            UNICODE_KEYSYM_PREFIX or codePoint
+        else -> null
+    }
+
+    private val ASCII_PRINTABLE_RANGE = 0x20..0x7E
+    private val LATIN_1_PRINTABLE_RANGE = 0xA0..0xFF
+    private const val UNICODE_KEYSYM_PREFIX = 0x01000000
 }

@@ -126,13 +126,13 @@ private fun CapabilitiesGroup(uiState: MainUiState) {
  * Where the phone's GPU is and is not in play — stated plainly so "make it
  * use the GPU" has a truthful answer. App-side drawing (VNC surface,
  * terminal glyphs) runs on the device GPU through hardware-accelerated
- * canvases. The *guest's* 3D cannot: stock Samsung firmware gives untrusted
- * apps no KVM and no GPU render nodes, so the guest renders GL in software
- * (llvmpipe) and this app tunes the desktop images accordingly.
+ * canvases. PRoot 3D uses a separately verified virgl bridge into Android
+ * EGL/Vulkan; a failed vendor backend is contained and falls back to llvmpipe.
  */
 @Composable
 private fun DisplayPathGroup() {
     val view = androidx.compose.ui.platform.LocalView.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val hardwareCanvas = view.isHardwareAccelerated
     GroupCard {
         ListRow(
@@ -143,10 +143,15 @@ private fun DisplayPathGroup() {
             else MaterialTheme.colorScheme.error,
         )
         RowDivider()
-        // Measured on this device by trying to open every GPU node, rather
-        // than assumed: "PRoot runs natively, so the GPU should work" is a
-        // fair expectation, and it deserves a real answer instead of a claim.
-        val guestGraphics = remember { GuestGraphicsSupport.measure() }
+        val nativeVirglAvailable = remember(context) {
+            java.io.File(
+                context.applicationInfo.nativeLibraryDir,
+                "libvirgl-test-server-android.so",
+            ).exists()
+        }
+        val guestGraphics = remember(nativeVirglAvailable) {
+            GuestGraphicsSupport.measure(nativeVirglAvailable)
+        }
         ListRow(
             title = "Guest 3D acceleration",
             subtitle = GuestGraphicsSupport.explain(guestGraphics),

@@ -10,6 +10,8 @@ import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 /**
  * Minimal RFB 3.8 client for QEMU's loopback VNC server: security type
@@ -28,7 +30,7 @@ class RfbClient(
     private val host: String,
     private val port: Int,
     private val listener: Listener,
-) : AutoCloseable {
+) : VncInputSink, AutoCloseable {
 
     interface Listener {
         /** New framebuffer geometry; the given bitmap replaces any previous one. */
@@ -40,10 +42,15 @@ class RfbClient(
         fun onDisconnected(reason: String)
     }
 
-    private lateinit var socket: Socket
+    @Volatile
+    private var socket: Socket? = null
     private lateinit var input: DataInputStream
     private lateinit var output: DataOutputStream
     private val writeLock = Any()
+    /** Preserves input order without ever performing socket I/O on Android's UI thread. */
+    private val inputWriter = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "rfb-input-$port").apply { isDaemon = true }
+    }
 
     @Volatile
     private var framebuffer: Bitmap? = null
@@ -53,23 +60,28 @@ class RfbClient(
 
     /** Reused across frames so decoding a busy desktop does not allocate. */
     private var rawByteScratch = ByteArray(0)
+    private var rawByteBuffer = ByteBuffer.wrap(rawByteScratch)
     private var pixelIntScratch = IntArray(0)
 
     private val statistics = FrameStatistics()
 
-    val framebufferWidth: Int get() = framebuffer?.width ?: 0
-    val framebufferHeight: Int get() = framebuffer?.height ?: 0
+    override val framebufferWidth: Int get() = framebuffer?.width ?: 0
+    override val framebufferHeight: Int get() = framebuffer?.height ?: 0
 
     /** Latest throughput measurement, safe to read from the UI thread. */
     fun currentStats(): FrameStats = statistics.snapshot(monotonicMillis())
 
     fun connect() {
         try {
-            socket = Socket()
-            socket.tcpNoDelay = true
-            socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
-            input = DataInputStream(socket.inputStream.buffered(INPUT_BUFFER_BYTES))
-            output = DataOutputStream(socket.outputStream.buffered())
+            if (closed) throw IOException("client was closed before connect")
+            val connectingSocket = Socket()
+            socket = connectingSocket
+            if (closed) throw IOException("client closed while connecting")
+
+            connectingSocket.tcpNoDelay = true
+            connectingSocket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            input = DataInputStream(connectingSocket.inputStream.buffered(INPUT_BUFFER_BYTES))
+            output = DataOutputStream(connectingSocket.outputStream.buffered())
 
             negotiateVersion()
             negotiateSecurity()
@@ -95,6 +107,8 @@ class RfbClient(
                     RfbProtocol.SERVER_SET_COLOURMAP -> skipColourMap()
                     RfbProtocol.SERVER_BELL -> Unit
                     RfbProtocol.SERVER_CUT_TEXT -> skipCutText()
+                    RfbProtocol.SERVER_END_CONTINUOUS_UPDATES -> Unit
+                    RfbProtocol.SERVER_FENCE -> skipFence()
                     else -> throw IOException("unknown server message $messageType")
                 }
             }
@@ -139,9 +153,10 @@ class RfbClient(
         output.flush()
         val width = input.readUnsignedShort()
         val height = input.readUnsignedShort()
-        input.skipBytes(16) // server pixel format — we override it anyway
+        discardFully(16) // server pixel format — we override it anyway
         val nameLength = input.readInt()
-        input.skipBytes(nameLength)
+        requirePayloadLength("desktop name", nameLength, MAX_DESKTOP_NAME_BYTES)
+        discardFully(nameLength)
         replaceFramebuffer(width, height)
         AppLog.info(SCOPE, "framebuffer ${width}x$height")
     }
@@ -182,7 +197,7 @@ class RfbClient(
     // ---- Server messages ---------------------------------------------------
 
     private fun handleFramebufferUpdate() {
-        input.skipBytes(1) // padding
+        discardFully(1) // padding
         val rectangleCount = input.readUnsignedShort()
 
         // Ask for the next frame *before* decoding this one, so QEMU renders
@@ -242,7 +257,7 @@ class RfbClient(
                 // Whole-screen redraw (the common GNOME case): RGB565 on the
                 // wire is byte-for-byte an RGB_565 bitmap, so this is a single
                 // native memcpy — no per-pixel Kotlin loop and no int buffer.
-                bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(rawBytes, 0, byteCount))
+                bitmap.copyPixelsFromBuffer(rawBuffer(byteCount))
             } else {
                 val pixels = pixelScratch(width * height)
                 RfbProtocol.decodeRawRectInto(rawBytes, pixels, width * height)
@@ -276,8 +291,17 @@ class RfbClient(
     private fun rawScratch(byteCount: Int): ByteArray {
         if (rawByteScratch.size < byteCount) {
             rawByteScratch = ByteArray(byteCount)
+            rawByteBuffer = ByteBuffer.wrap(rawByteScratch)
         }
         return rawByteScratch
+    }
+
+    /** Rewinds the wrapper reused by whole-frame RGB565 copies. */
+    private fun rawBuffer(byteCount: Int): ByteBuffer {
+        rawScratch(byteCount)
+        rawByteBuffer.clear()
+        rawByteBuffer.limit(byteCount)
+        return rawByteBuffer
     }
 
     private fun pixelScratch(pixelCount: Int): IntArray {
@@ -321,15 +345,58 @@ class RfbClient(
     }
 
     private fun skipColourMap() {
-        input.skipBytes(3)
+        discardFully(3)
         val colourCount = input.readUnsignedShort()
-        input.skipBytes(colourCount * 6)
+        discardFully(colourCount * COLOUR_MAP_BYTES_PER_ENTRY)
     }
 
     private fun skipCutText() {
-        input.skipBytes(3)
-        val textLength = input.readInt()
-        input.skipBytes(textLength)
+        discardFully(3)
+        val encodedLength = input.readInt()
+        // TigerVNC/QEMU extended clipboard messages encode their payload
+        // length as a negative signed value. A previous external viewer can
+        // make the server announce clipboard state to the local connection;
+        // treating that negative value as "skip nothing" leaves payload
+        // bytes in the stream and the next ASCII byte becomes a bogus server
+        // message (the observed value 101 is 'e'). We do not consume the
+        // clipboard, but we must always consume its complete wire payload.
+        val payloadLength = if (encodedLength < 0) {
+            -encodedLength.toLong()
+        } else {
+            encodedLength.toLong()
+        }
+        if (payloadLength > MAX_CLIPBOARD_BYTES) {
+            throw IOException("server clipboard payload too large: $payloadLength bytes")
+        }
+        discardFully(payloadLength.toInt())
+    }
+
+    /** Fence is optional RFB flow-control traffic; ignoring its body corrupts the stream. */
+    private fun skipFence() {
+        discardFully(3) // padding
+        input.readInt() // flags
+        val payloadLength = input.readUnsignedByte()
+        if (payloadLength > MAX_FENCE_BYTES) {
+            throw IOException("server fence payload too large: $payloadLength bytes")
+        }
+        discardFully(payloadLength)
+    }
+
+    /** Reads rather than skips: InputStream.skip is explicitly allowed to stop early. */
+    private fun discardFully(byteCount: Int) {
+        requirePayloadLength("RFB payload", byteCount, MAX_DISCARDABLE_BYTES)
+        var remaining = byteCount
+        while (remaining > 0) {
+            val chunkBytes = minOf(remaining, discardScratch.size)
+            input.readFully(discardScratch, 0, chunkBytes)
+            remaining -= chunkBytes
+        }
+    }
+
+    private fun requirePayloadLength(description: String, byteCount: Int, maximum: Int) {
+        if (byteCount !in 0..maximum) {
+            throw IOException("invalid $description length: $byteCount")
+        }
     }
 
     private fun readErrorReason(): String {
@@ -341,21 +408,18 @@ class RfbClient(
     // ---- Input -------------------------------------------------------------
 
     /** [buttonMask]: bit0 = left, bit1 = middle, bit2 = right, bits 3/4 = wheel. */
-    fun sendPointerEvent(x: Int, y: Int, buttonMask: Int) {
-        if (closed) return
-        runCatching {
+    override fun sendPointerEvent(x: Int, y: Int, buttonMask: Int): Boolean =
+        enqueueInputMessage("pointer event") {
             sendMessage {
                 output.writeByte(RfbProtocol.CLIENT_POINTER_EVENT)
                 output.writeByte(buttonMask)
-                output.writeShort(x.coerceIn(0, framebufferWidth - 1))
-                output.writeShort(y.coerceIn(0, framebufferHeight - 1))
+                output.writeShort(clampCoordinate(x, framebufferWidth))
+                output.writeShort(clampCoordinate(y, framebufferHeight))
             }
         }
-    }
 
-    fun sendKeyEvent(keysym: Int, isDown: Boolean) {
-        if (closed) return
-        runCatching {
+    override fun sendKeyEvent(keysym: Int, isDown: Boolean): Boolean =
+        enqueueInputMessage("key event") {
             sendMessage {
                 output.writeByte(RfbProtocol.CLIENT_KEY_EVENT)
                 output.writeByte(if (isDown) 1 else 0)
@@ -363,7 +427,27 @@ class RfbClient(
                 output.writeInt(keysym)
             }
         }
+
+    private fun enqueueInputMessage(description: String, send: () -> Unit): Boolean {
+        if (closed) return false
+        return try {
+            inputWriter.execute {
+                if (closed) return@execute
+                try {
+                    send()
+                } catch (error: Exception) {
+                    AppLog.warn(SCOPE, "failed to send $description", error)
+                    close()
+                }
+            }
+            true
+        } catch (_: RejectedExecutionException) {
+            false
+        }
     }
+
+    private fun clampCoordinate(coordinate: Int, extent: Int): Int =
+        if (extent > 0) coordinate.coerceIn(0, extent - 1) else 0
 
     private inline fun sendMessage(write: () -> Unit) {
         synchronized(writeLock) {
@@ -377,13 +461,20 @@ class RfbClient(
 
     override fun close() {
         closed = true
-        runCatching { socket.close() }
+        inputWriter.shutdownNow()
+        runCatching { socket?.close() }
     }
 
     companion object {
         private const val SCOPE = "RfbClient"
         private const val CONNECT_TIMEOUT_MS = 5_000
         private const val INPUT_BUFFER_BYTES = 1 shl 16
+        private const val MAX_DESKTOP_NAME_BYTES = 1 shl 20
+        private const val MAX_CLIPBOARD_BYTES = 32L shl 20
+        private const val MAX_DISCARDABLE_BYTES = 32 shl 20
+        private const val MAX_FENCE_BYTES = 64
+        private const val COLOUR_MAP_BYTES_PER_ENTRY = 6
+        private const val DISCARD_BUFFER_BYTES = 8 * 1024
 
         /**
          * Derived from the format we negotiate rather than restated, so the
@@ -394,4 +485,7 @@ class RfbClient(
         /** The src-x/src-y header of a CopyRect. Unrelated to [PIXEL_BYTES]. */
         private const val COPY_RECT_HEADER_BYTES = 4
     }
+
+    /** Fixed-size buffer used by [discardFully] for allocation-free draining. */
+    private val discardScratch = ByteArray(DISCARD_BUFFER_BYTES)
 }

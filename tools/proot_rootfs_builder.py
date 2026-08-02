@@ -35,6 +35,9 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
+RELEASE_VERSION = "1.1.11"
+
+
 @dataclass(frozen=True)
 class ProotDesktopBuildRequest:
     """Everything the rootfs bake needs, resolved by the caller."""
@@ -199,6 +202,7 @@ def _render_build_user_data(password: str) -> str:
     """cloud-config that assembles the rootfs and streams it out."""
     supervisor = _indent_for_write_files(DESKTOP_SUPERVISOR_SCRIPT)
     code_wrapper = _indent_for_write_files(VSCODE_WRAPPER_SCRIPT)
+    firefox_wrapper = _indent_for_write_files(FIREFOX_WRAPPER_SCRIPT)
     fps_benchmark = _indent_for_write_files(FPS_BENCHMARK_SCRIPT)
     process_budget = _indent_for_write_files(PROCESS_BUDGET_SCRIPT)
     group_namer = _indent_for_write_files(GROUP_NAMER_SCRIPT)
@@ -250,6 +254,12 @@ write_files:
     permissions: "0755"
     content: |
 {code_wrapper}
+  # Firefox cannot use Linux namespaces from PRoot. Keep its launcher in one
+  # reviewable place instead of weakening the package or desktop file.
+  - path: /opt/linux-on-dex/firefox-wrapper
+    permissions: "0755"
+    content: |
+{firefox_wrapper}
   # Gives Android's supplementary group ids names inside the container.
   - path: /usr/local/bin/dex-name-groups
     permissions: "0755"
@@ -296,17 +306,10 @@ write_files:
     permissions: "0644"
     content: |
 {sshd_config}
-  # Ubuntu's own session lists settings-daemon components as REQUIRED, and
-  # the power plugin exits 1 without logind — gnome-session then replaces
-  # the whole desktop with its "Oh no! Something has gone wrong" screen.
-  # This session requires only what actually runs in a container; XSettings
-  # is kept because it carries the theme, fonts and DPI into every app.
-  - path: /usr/share/gnome-session/sessions/dex.session
+  - path: /etc/linux-on-dex-release
     permissions: "0644"
     content: |
-      [GNOME Session]
-      Name=Linux on DeX
-      RequiredComponents=org.gnome.Shell;org.gnome.SettingsDaemon.XSettings;
+      Linux on DeX {RELEASE_VERSION} Ubuntu 24.04 GNOME Shell
   - path: /etc/dconf/profile/user
     permissions: "0644"
     content: |
@@ -336,6 +339,24 @@ runcmd:
   # Every entry below runs in its own subshell: cloud-init concatenates
   # runcmd into ONE script, so a bare `set -e` here would silently abort
   # all later entries — including the export that produces the artifact.
+  # Firefox: Mozilla's signed native arm64 package. The key fingerprint is
+  # checked before APT is allowed to trust it.
+  - |
+    (
+      set -e
+      export DEBIAN_FRONTEND=noninteractive
+      install -d -m 0755 /etc/apt/keyrings
+      curl -fsSL 'https://packages.mozilla.org/apt/repo-signing-key.gpg' -o /etc/apt/keyrings/packages.mozilla.org.asc
+      fingerprint="$(gpg --batch --show-keys --with-colons /etc/apt/keyrings/packages.mozilla.org.asc | awk -F: '$1 == "fpr" {{ print $10; exit }}')"
+      test "$fingerprint" = '35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3'
+      printf '%s\\n' 'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' > /etc/apt/sources.list.d/mozilla.list
+      printf '%s\\n' 'Package: *' 'Pin: origin packages.mozilla.org' 'Pin-Priority: 1000' > /etc/apt/preferences.d/mozilla
+      apt-get update
+      apt-get install -y firefox
+      install -m 0755 /opt/linux-on-dex/firefox-wrapper /usr/local/bin/firefox
+      test -x /usr/lib/firefox/firefox
+      test -x /usr/local/bin/firefox
+    ) || echo 'DEX_BAKE_STEP_FAILED: firefox install'
   # VS Code: Microsoft's arm64 build, installed with full dependency
   # resolution. Point the desktop launchers at the PRoot-safe wrapper.
   - |
@@ -361,12 +382,9 @@ runcmd:
   # cannot survive here — and every one of them also costs start-up time
   # and CPU that the desktop should be spending on frames.
   #
-  # The session therefore keeps only what it needs: X, two D-Bus daemons,
-  # sshd, gnome-session, gnome-shell, XSettings and dconf. Autostart is
-  # emptied rather than pruned entry by entry, because required components
-  # come from the session file and everything else here is optional by
-  # definition. D-Bus activation files are removed as well, or the same
-  # daemons would come back the moment something asked for them.
+  # The session therefore keeps only X, D-Bus, sshd, GNOME Shell/Mutter,
+  # XSettings and dconf. GNOME Shell is launched directly so an optional
+  # session component cannot replace the desktop with the recovery screen.
   - |
     mkdir -p /usr/share/linux-on-dex/disabled-autostart
     for entry in /etc/xdg/autostart/*.desktop; do
@@ -401,25 +419,23 @@ runcmd:
     # spawns processes of its own, could take the session down with it.
     rm -f /usr/share/dbus-1/services/org.gtk.vfs.*.service \
           /usr/share/dbus-1/services/org.gtk.Private.*.service 2>/dev/null || true
-    # Nautilus is the only reason gvfs is pulled in at all, and it works
-    # without it for local files.
-    apt-get purge -y gvfs gvfs-daemons gvfs-backends 2>/dev/null || true
+    # Nautilus declares gvfs as a package dependency. Purging it makes apt
+    # remove the file manager, so keep the libraries but disable activation.
+    # Keep the libraries but leave activation disabled above, so the helpers
+    # cannot consume Android's process budget.
     # The last few daemons with nothing to do here, each costing a slot in
     # the process budget: a supplicant with no radio, an authority that
     # cannot escalate what is already fake root, a permission store for
     # portals that were removed above, and a calendar server with no
     # calendars.
     for service in org.freedesktop.PolicyKit1 \
-                   org.freedesktop.impl.portal.PermissionStore \
-                   org.gnome.Shell.CalendarServer \
-                   org.gnome.Shell.Screencast \
-                   org.gnome.Shell.Notifications; do
+                   org.freedesktop.impl.portal.PermissionStore; do
       rm -f "/usr/share/dbus-1/services/$service.service" \
             "/usr/share/dbus-1/system-services/$service.service"
     done
     apt-get purge -y wpasupplicant 2>/dev/null || true
     apt-get autoremove --purge -y 2>/dev/null || true
-    for essential in /usr/bin/gnome-shell /usr/bin/gnome-session /usr/bin/Xtigervnc; do
+    for essential in /usr/bin/gnome-shell /usr/bin/Xtigervnc; do
       test -x "$essential" || echo "DEX_BAKE_STEP_FAILED: trimming removed $essential"
     done
     # ibus is an input-method framework with nothing to do here, and it
@@ -428,13 +444,12 @@ runcmd:
     apt-get purge -y ibus packagekit rygel gnome-remote-desktop 2>/dev/null || true
     apt-get autoremove --purge -y 2>/dev/null || true
     # Purging must never take the desktop with it.
-    for essential in /usr/bin/gnome-shell /usr/bin/gnome-session /usr/bin/Xtigervnc /usr/local/bin/code; do
+    for essential in /usr/bin/gnome-shell /usr/bin/Xtigervnc /usr/local/bin/code /usr/local/bin/firefox; do
       test -x "$essential" || echo "DEX_BAKE_STEP_FAILED: purge removed $essential"
     done
-    # The shell mode makes this "Ubuntu GNOME" rather than plain GNOME; the
-    # session file is what keeps gnome-session off the fail-whale path.
-    test -f /usr/share/gnome-shell/modes/ubuntu.json || echo 'DEX_BAKE_STEP_FAILED: ubuntu shell mode missing'
-    test -f /usr/share/gnome-session/sessions/dex.session || echo 'DEX_BAKE_STEP_FAILED: dex session missing'
+    for removed in /usr/bin/gnome-flashback /usr/bin/gnome-panel /usr/bin/openbox; do
+      test ! -e "$removed" || echo "DEX_BAKE_STEP_FAILED: legacy desktop remains: $removed"
+    done
   # A container has no kernel to keep: everything below is dead weight the
   # phone would extract, store and never execute.
   - |
@@ -520,6 +535,8 @@ def _indent_for_write_files(body: str) -> str:
 # ubuntu-session, the Yaru theme and the session's D-Bus services arrive.
 GUEST_PACKAGES = (
     "gnome-shell",
+    "gnome-session",
+    "gnome-settings-daemon",
     "gnome-terminal",
     "nautilus",
     "gnome-control-center",
@@ -534,9 +551,12 @@ GUEST_PACKAGES = (
     "openssh-client",
     "curl",
     "ca-certificates",
+    "gnupg",
     # glxgears and glxinfo, so desktop smoothness can be measured on the
     # actual phone instead of estimated (see /usr/local/bin/dex-fps).
     "mesa-utils",
+    "x11-utils",
+    "xdotool",
 )
 
 # Started by the app inside PRoot; its lifetime IS the session's lifetime.
@@ -548,6 +568,7 @@ set -u
 
 RESOLUTION="${DEX_RESOLUTION:-1280x800}"
 VNC_PORT="${DEX_VNC_PORT:-5901}"
+MAX_FRAME_RATE=240
 
 log() { echo "[dex-desktop] $*"; }
 
@@ -557,11 +578,22 @@ export LANG=C.UTF-8
 export DISPLAY=:1
 export XDG_RUNTIME_DIR=/run/user/0
 export XDG_SESSION_TYPE=x11 XDG_SESSION_CLASS=user
-export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-export GNOME_SHELL_SESSION_MODE=ubuntu
-# No GPU reaches the container: software GL for the shell, and cairo for
-# GTK4 apps (faster than GL-on-CPU).
-export LIBGL_ALWAYS_SOFTWARE=1
+export XDG_CURRENT_DESKTOP=GNOME
+export XDG_SESSION_DESKTOP=gnome
+export XDG_SESSION_MODE=user
+export GDMSESSION=gnome-xorg
+# Use the native virgl bridge after the app has validated it with EGL. Keep a
+# predictable llvmpipe fallback for devices whose Android EGL cannot start.
+if [ "${DEX_GPU_BRIDGE:-0}" = 1 ]; then
+    export LIBGL_ALWAYS_SOFTWARE=1
+    export GALLIUM_DRIVER=virpipe
+    export MESA_GL_VERSION_OVERRIDE=3.3
+    export MESA_GLES_VERSION_OVERRIDE=3.1
+    log "native Android virgl bridge enabled"
+else
+    export LIBGL_ALWAYS_SOFTWARE=1
+    log "native GPU bridge unavailable; using llvmpipe"
+fi
 export GSK_RENDERER=cairo
 # Every avoidable helper process matters: Android kills the whole tree once
 # an app's children pass its phantom-process cap. These three switch off
@@ -599,9 +631,10 @@ else
 fi
 
 log "starting Xvnc :1 at $RESOLUTION on port $VNC_PORT"
-# -FrameRate 60: the per-client update ceiling, stated rather than assumed.
-# -NeverShared: the app opens exactly one connection, and shared mode makes
-#   the server maintain state for viewers that never arrive.
+# -FrameRate 240: the requested per-client ceiling. Android still presents at
+# the physical display refresh rate (120 Hz on the target S23 Ultra).
+# -AlwaysShared: a newly recreated DeX window must not evict the viewer that
+#   is still unwinding its blocking socket read.
 #
 # Deliberately not tuned further: TigerVNC 1.13's remaining update options
 # (CompareFB in particular) trade bandwidth against CPU for a *network*
@@ -609,8 +642,8 @@ log "starting Xvnc :1 at $RESOLUTION on port $VNC_PORT"
 # server rejects options it does not know by refusing to start at all — so
 # only flags verified against its own help output are used here.
 Xtigervnc :1 -geometry "$RESOLUTION" -depth 24 \
-    -rfbport "$VNC_PORT" -localhost -SecurityTypes None -NeverShared \
-    -FrameRate 60 \
+    -rfbport "$VNC_PORT" -localhost -SecurityTypes None -AlwaysShared \
+    -FrameRate "$MAX_FRAME_RATE" \
     -desktop "Linux on DeX" &
 XVNC_PID=$!
 
@@ -623,16 +656,13 @@ while [ ! -S /tmp/.X11-unix/X1 ]; do
     sleep 0.1
 done
 
-log "starting the GNOME session"
-dbus-run-session -- gnome-session --session=dex --disable-acceleration-check
-SESSION_STATUS=$?
-log "gnome-session ended (status $SESSION_STATUS)"
-if [ "$SESSION_STATUS" -ne 0 ]; then
-    # Without systemd some gnome-session builds refuse to manage the
-    # session; the shell alone is still a full desktop.
-    log "falling back to a bare GNOME Shell"
-    exec dbus-run-session -- gnome-shell --x11
-fi
+log "starting the native GNOME Shell X11 session"
+# GNOME Shell is the real desktop and Mutter is its window manager. Launch it
+# directly: gnome-session's recovery screen treats any optional helper that
+# cannot use logind/systemd inside PRoot as a fatal desktop failure.
+exec dbus-run-session -- sh -c '\
+    /usr/libexec/gsd-xsettings >/tmp/gsd-xsettings.log 2>&1 & \
+    exec gnome-shell --x11 >/tmp/gnome-shell.log 2>&1'
 """
 
 VSCODE_WRAPPER_SCRIPT = r"""#!/bin/sh
@@ -651,6 +681,16 @@ exec /usr/share/code/code \
     --disable-features=CalculateNativeWinOcclusion,UseChromeOSDirectVideoDecoder \
     --password-store=basic \
     "$@"
+"""
+
+FIREFOX_WRAPPER_SCRIPT = r"""#!/bin/sh
+# Firefox's Linux content sandbox requires namespaces that PRoot cannot
+# create. Keep the exception scoped to Firefox inside this single-user
+# container; normal TLS and site isolation remain enabled.
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_ENABLE_WAYLAND=0
+exec /usr/lib/firefox/firefox --no-remote "$@"
 """
 
 # Apps may not bind ports below 1024, and the phone's own network must not
@@ -689,6 +729,7 @@ Acquire::Queue-Mode "access";
 Acquire::http::Pipeline-Depth "0";
 Acquire::Retries "3";
 Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
 Acquire::Languages "none";
 Dpkg::Use-Pty "0";
 """
@@ -708,15 +749,20 @@ GROUP_NAMER_SCRIPT = r"""#!/bin/sh
 set -u
 
 GROUP_FILE=/etc/group
+LOCK_FILE=/etc/.linux-on-dex-groups.lock
 [ -w "$GROUP_FILE" ] || exit 0
 
-for group_id in $(id -G 2>/dev/null); do
-    # Already named — by Ubuntu itself or by an earlier run.
-    if cut -d: -f3 "$GROUP_FILE" | grep -qx "$group_id"; then
-        continue
-    fi
-    printf 'android%s:x:%s:\n' "$group_id" "$group_id" >> "$GROUP_FILE"
-done
+(
+    flock 9
+    for group_id in $(id -G 2>/dev/null); do
+        case "$group_id" in *[!0-9]*|'') continue ;; esac
+        # Already named — by Ubuntu itself or by an earlier run.
+        if cut -d: -f3 "$GROUP_FILE" | grep -qx "$group_id"; then
+            continue
+        fi
+        printf 'android%s:x:%s:\n' "$group_id" "$group_id" >> "$GROUP_FILE"
+    done
+) 9>>"$LOCK_FILE"
 """
 
 PROCESS_BUDGET_SCRIPT = r"""#!/bin/sh
@@ -763,7 +809,7 @@ set -u
 
 SECONDS_TO_RUN="${1:-20}"
 
-SHELL_PID=$(pgrep -f '/usr/bin/gnome-shell' | head -1)
+SHELL_PID=$(pgrep -x gnome-shell | head -1)
 if [ -n "$SHELL_PID" ] && [ -r "/proc/$SHELL_PID/environ" ]; then
     BUS_LINE=$(tr '\0' '\n' < "/proc/$SHELL_PID/environ" | grep '^DBUS_SESSION_BUS_ADDRESS=' || true)
     [ -n "$BUS_LINE" ] && export "$BUS_LINE"
@@ -818,7 +864,7 @@ disable-external=true
 experimental-features=@as []
 [org/gnome/shell]
 disable-user-extensions=false
-favorite-apps=['code.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.TextEditor.desktop']
+favorite-apps=['firefox.desktop', 'code.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.Nautilus.desktop']
 """
 
 # Keeps the shell's window size matching the app's terminal.
@@ -884,15 +930,15 @@ EXPORT_DISK_BYTES = 12 << 30
 REQUIRED_ARCHIVE_ENTRIES = (
     "usr/local/bin/dex-desktop",
     "usr/local/bin/code",
+    "usr/local/bin/firefox",
     "usr/local/bin/dex-fps",
     "usr/local/bin/dex-processes",
     "usr/bin/glxgears",
     "usr/bin/Xtigervnc",
     "usr/bin/gnome-shell",
-    "usr/bin/gnome-session",
     "usr/bin/git",
     "usr/sbin/sshd",
     "usr/share/code/code",
-    "usr/share/gnome-session/sessions/dex.session",
-    "usr/share/gnome-shell/modes/ubuntu.json",
+    "usr/lib/firefox/firefox",
+    "etc/linux-on-dex-release",
 )

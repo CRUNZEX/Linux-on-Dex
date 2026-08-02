@@ -10,6 +10,7 @@ import org.junit.runner.RunWith
 import com.crunzex.linuxondex.engine.runtime.NativeCommand
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
+import com.crunzex.linuxondex.engine.proot.AndroidVirglBridge
 
 /**
  * On-device proof that the repackaged Termux payload actually runs under this
@@ -61,6 +62,19 @@ class QemuPayloadSmokeTest {
     }
 
     @Test
+    fun qemuPayloadContainsTheUsbControllerAndLibusbHostBackend() {
+        val result = NativeCommand(
+            program = paths.qemuSystemBinary,
+            arguments = listOf("-device", "help"),
+            environment = paths.processEnvironment(),
+        ).runAndCaptureOutput()
+
+        assertEquals("qemu -device help failed: ${result.output}", 0, result.exitCode)
+        assertTrue("qemu-xhci is missing from the payload", result.output.contains("qemu-xhci"))
+        assertTrue("usb-host/libusb is missing from the payload", result.output.contains("usb-host"))
+    }
+
+    @Test
     fun prootBinaryExecutes() {
         val result = NativeCommand(
             program = paths.prootBinary,
@@ -74,6 +88,28 @@ class QemuPayloadSmokeTest {
             "unexpected proot banner: ${result.output}",
             result.output.contains("proot", ignoreCase = true),
         )
+    }
+
+    @Test
+    fun nativeVirglBridgePublishesItsSocket() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        PayloadInstaller(context, paths).ensureInstalled()
+        val bridge = AndroidVirglBridge(paths)
+
+        try {
+            assertTrue(
+                "virgl/ANGLE did not publish ${paths.virglSocket}; see virgl-renderer.log",
+                bridge.start(),
+            )
+            assertTrue("virgl bridge process/socket is not alive", bridge.isRunning)
+            assertTrue(
+                "ANGLE Vulkan backend was not installed",
+                paths.vmRootDir.resolve("angle/vulkan/libEGL_angle.so").exists(),
+            )
+        } finally {
+            bridge.stop()
+        }
+        assertTrue("virgl socket leaked after stop", !paths.virglSocket.exists())
     }
 
     @Test

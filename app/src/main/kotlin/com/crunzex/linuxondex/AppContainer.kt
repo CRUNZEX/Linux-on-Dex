@@ -56,7 +56,7 @@ class AppContainer(context: Context) {
     /** Read-only USB listing for the Monitor screen; never touches the VM. */
     val usbDeviceMonitor: UsbDeviceMonitor by lazy { UsbDeviceMonitor(appContext) }
 
-    /** Hands one USB device to the guest while the VM runs. */
+    /** Hands selected USB devices to the guest while the VM runs. */
     val usbPassthroughManager: UsbPassthroughManager by lazy {
         UsbPassthroughManager(appContext)
     }
@@ -75,11 +75,7 @@ class AppContainer(context: Context) {
             diskManager = diskImageManager,
             repository = vmRepository,
             preparedImages = preparedImageRepository,
-            // Opened at boot; a device that is unplugged or not permitted is
-            // simply skipped and the VM starts without that one.
-            usbDeviceProvider = { config ->
-                usbPassthroughManager.openForPassthrough(config.usb.passthroughDevices)
-            },
+            usbPassthroughManager = usbPassthroughManager,
         )
     }
 

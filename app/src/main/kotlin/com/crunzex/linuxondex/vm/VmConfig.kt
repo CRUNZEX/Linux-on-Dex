@@ -95,8 +95,10 @@ data class VmConfig(
 
         /**
          * The most memory the guest may be given: the device's size less the
-         * 2 GB Android keeps for itself. A 12 GB phone therefore offers
-         * 10240 MB.
+         * 3 GB Android and Samsung DeX keep for themselves. A 12 GB phone
+         * therefore offers 9216 MB. QEMU's translation cache and the app UI
+         * live outside guest RAM, so the older 2 GB reserve could still
+         * exhaust the host during a large install or model load.
          *
          * The device size is taken as the capacity it was built with, not
          * the figure the kernel reports: a 12 GB phone reports about
@@ -137,7 +139,7 @@ data class VmConfig(
             12 * 1024, 16 * 1024, 18 * 1024, 24 * 1024, 32 * 1024,
         )
 
-        private const val ANDROID_RESERVED_RAM_MB = 2048
+        private const val ANDROID_RESERVED_RAM_MB = 3072
 
         /**
          * What a new VM starts with: 4 vCPUs and 4 GB.
@@ -179,6 +181,7 @@ data class VmConfig(
          */
         const val RECOMMENDED_DESKTOP_MEMORY_MB = 4096
         const val RECOMMENDED_DESKTOP_DISK_GB = 32
+
     }
 }
 

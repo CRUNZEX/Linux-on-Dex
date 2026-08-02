@@ -1,15 +1,15 @@
 package com.crunzex.linuxondex.capability
 
 import java.io.File
+import java.io.RandomAccessFile
 
 /**
  * Whether a Linux guest on this device could reach the GPU, and if not, why.
  *
- * Worth answering precisely, because "it runs natively under PRoot, so surely
- * it can use the GPU" is a reasonable expectation that happens to be wrong,
- * and the reason is not obvious.
+ * Worth answering precisely because direct device-node access and the native
+ * virgl bridge are different capabilities.
  *
- * Two things have to be true for guest 3D, and on stock firmware neither is:
+ * Direct rendering needs two things stock firmware normally withholds:
  *
  *  1. **A device node the app may open.** Rendering needs `/dev/dri/renderD*`
  *     (the standard interface), or the vendor's own node — `/dev/kgsl-3d0` on
@@ -20,15 +20,19 @@ import java.io.File
  *     where a node is readable — which is why a container gains native CPU
  *     speed but no GPU, unlike the CPU, which needs no driver at all.
  *
- * The check is a real open attempt rather than an existence test: a node can
- * be listed and still be unopenable, and only opening it settles the matter.
+ * The app therefore also ships a Bionic virgl server. It uses Android's public
+ * EGL/Vulkan APIs and accepts Mesa virpipe commands from the glibc PRoot guest.
+ * The engine validates that complete route on every desktop start.
  */
 object GuestGraphicsSupport {
 
     /** What the guest can use to draw, as measured on this device. */
     enum class Renderer(val displayName: String) {
-        /** A GPU node opened successfully — a guest could use hardware. */
-        HARDWARE("Hardware (GPU node open)"),
+        /** A GPU node opened successfully — a matching guest driver can use it. */
+        HARDWARE_DIRECT("Direct GPU node"),
+
+        /** Mesa commands cross to a Bionic renderer using Android EGL/Vulkan. */
+        HARDWARE_VIRGL("VirGL + Android GPU"),
 
         /** No usable node: the guest's drawing is done by the CPU. */
         SOFTWARE_LLVMPIPE("Software (llvmpipe)"),
@@ -48,15 +52,18 @@ object GuestGraphicsSupport {
 
     /** The measured renderer, plus the node that decided it. */
     data class Verdict(val renderer: Renderer, val openedNodePath: String?) {
-        val isHardware: Boolean get() = renderer == Renderer.HARDWARE
+        val isHardware: Boolean get() = renderer != Renderer.SOFTWARE_LLVMPIPE
     }
 
-    fun measure(): Verdict {
+    fun measure(nativeVirglRendererAvailable: Boolean = false): Verdict {
         val openableNode = GPU_DEVICE_NODES.firstOrNull(::canOpenForRendering)
-        return if (openableNode == null) {
-            Verdict(Renderer.SOFTWARE_LLVMPIPE, openedNodePath = null)
-        } else {
-            Verdict(Renderer.HARDWARE, openedNodePath = openableNode)
+        return when {
+            openableNode != null ->
+                Verdict(Renderer.HARDWARE_DIRECT, openedNodePath = openableNode)
+            nativeVirglRendererAvailable ->
+                Verdict(Renderer.HARDWARE_VIRGL, openedNodePath = null)
+            else ->
+                Verdict(Renderer.SOFTWARE_LLVMPIPE, openedNodePath = null)
         }
     }
 
@@ -67,7 +74,10 @@ object GuestGraphicsSupport {
     private fun canOpenForRendering(nodePath: String): Boolean {
         val node = File(nodePath)
         if (!node.exists()) return false
-        return runCatching { node.inputStream().use { true } }.getOrDefault(false)
+        // Render nodes are ioctl endpoints, not readable streams. Opening
+        // O_RDWR is the capability Mesa/virgl actually needs and avoids a
+        // false negative on drivers that reject a read-only open.
+        return runCatching { RandomAccessFile(node, "rw").use { true } }.getOrDefault(false)
     }
 
     /**
@@ -75,13 +85,15 @@ object GuestGraphicsSupport {
      * Pure so the wording can be pinned by a test.
      */
     fun explain(verdict: Verdict): String = when (verdict.renderer) {
-        Renderer.HARDWARE ->
+        Renderer.HARDWARE_DIRECT ->
             "A GPU node (${verdict.openedNodePath}) is readable, so a guest " +
                 "could use hardware once a matching driver ships in the image."
+        Renderer.HARDWARE_VIRGL ->
+            "PRoot can forward Mesa through virpipe to Android EGL/Vulkan. " +
+                "The route is tested at each desktop start and falls back to " +
+                "llvmpipe if this device's driver rejects it."
         Renderer.SOFTWARE_LLVMPIPE ->
-            "Android denies apps every GPU node, and Linux programs cannot " +
-                "load Android's own driver, so the guest desktop is drawn by " +
-                "the CPU. Fewer pixels is the effective lever: lower the " +
-                "display resolution."
+            "No native virgl bridge is packaged and Android denies every GPU " +
+                "node, so the guest uses llvmpipe."
     }
 }

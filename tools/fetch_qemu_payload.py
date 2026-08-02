@@ -51,8 +51,15 @@ ALPINE_MINIROOTFS_URL = (
 # Termux installs under this prefix inside every .deb.
 TERMUX_PREFIX = "data/data/com.termux/files"
 
-# Packages whose binaries we actually run.
-ROOT_PACKAGES = ["qemu-system-aarch64-headless", "qemu-utils", "proot"]
+# Packages whose binaries we actually run. virglrenderer-android is the host
+# half of Mesa's virpipe protocol: it renders through Android EGL/GLES while a
+# PRoot guest sends Gallium commands over a Unix socket.
+ROOT_PACKAGES = [
+    "qemu-system-aarch64-headless",
+    "qemu-utils",
+    "proot",
+    "virglrenderer-android",
+]
 
 # Executables to expose in jniLibs, renamed to lib*.so.
 EXECUTABLES = {
@@ -60,6 +67,28 @@ EXECUTABLES = {
     "usr/bin/qemu-img": "libqemu-img.so",
     "usr/bin/proot": "libproot.so",
     "usr/libexec/proot/loader": "libproot-loader.so",
+    "usr/bin/virgl_test_server_android": "libvirgl-test-server-android.so",
+}
+
+# Termux's Android virgl build embeds the Termux data directory for its ANGLE
+# fallback. The replacement is shorter, stable for the primary Android user,
+# and points at files copied from our own signed APK. Padding preserves every
+# ELF offset; no executable section is resized.
+ANGLE_PATH_REPLACEMENTS = {
+    b"/data/data/com.termux/files/usr/opt/angle-android/gl":
+        b"/data/data/com.crunzex.linuxondex/files/vm/angle/gl",
+    b"/data/data/com.termux/files/usr/opt/angle-android/vulkan\0":
+        b"/data/data/com.crunzex.linuxondex/files/vm/angle/vulkan\0",
+}
+
+# virglrenderer 1.3 requests EGL_CONTEXT_MINOR_VERSION_KHR=2 for every GLES
+# context. Android Studio's API 34/36 ARM64 renderer advertises GLES 3.0/3.1
+# and aborts the server with EGL_BAD_CONFIG. In the pinned ARM64 build this
+# unique instruction loads the minor-version attribute key. Replacing it with
+# EGL_NONE terminates the list after the major version (3), letting EGL choose
+# its supported 3.x context. Both byte sequences are verified before writing.
+VIRGL_GLES_CONTEXT_PATCH = {
+    bytes.fromhex("68 1f 86 52"): bytes.fromhex("08 07 86 52"),
 }
 
 # QEMU data files required for the aarch64 'virt' machine. Everything else in
@@ -268,7 +297,14 @@ def index_shared_libraries(
     file_by_name: dict[str, Path] = {}
     soname_by_name: dict[str, str] = {}
 
-    for library in sorted(extract_root.glob(f"*/{TERMUX_PREFIX}/usr/lib/*.so*")):
+    library_patterns = (
+        f"*/{TERMUX_PREFIX}/usr/lib/*.so*",
+        f"*/{TERMUX_PREFIX}/usr/opt/virglrenderer-android/lib/*.so*",
+    )
+    libraries = sorted(
+        {library for pattern in library_patterns for library in extract_root.glob(pattern)}
+    )
+    for library in libraries:
         if library.is_symlink() or not is_elf(library):
             continue
         soname = read_soname(library, patchelf) or library.name
@@ -276,7 +312,7 @@ def index_shared_libraries(
             file_by_name.setdefault(name, library)
             soname_by_name.setdefault(name, soname)
 
-    for link in sorted(extract_root.glob(f"*/{TERMUX_PREFIX}/usr/lib/*.so*")):
+    for link in libraries:
         if not link.is_symlink():
             continue
         target = link.resolve()
@@ -347,6 +383,11 @@ def patch_and_install_elves(
         shutil.copy2(source, destination)
         destination.chmod(0o755)
 
+        if output_name == EXECUTABLES["usr/bin/virgl_test_server_android"]:
+            rewrite_embedded_paths(destination, ANGLE_PATH_REPLACEMENTS)
+        if output_name == "libvirglrenderer.so":
+            rewrite_fixed_bytes(destination, VIRGL_GLES_CONTEXT_PATCH)
+
         commands: list[list[str]] = []
         if read_soname(destination, patchelf) is not None:
             commands.append(["--set-soname", output_name])
@@ -367,6 +408,39 @@ def patch_and_install_elves(
             [patchelf, "--remove-rpath", str(destination)], capture_output=True
         )
     log(f"installed {len(list(JNILIBS_DIR.iterdir()))} ELF files into {JNILIBS_DIR}")
+
+
+def rewrite_embedded_paths(path: Path, replacements: dict[bytes, bytes]) -> None:
+    """Replace fixed-width absolute paths embedded in an ELF safely."""
+    contents = path.read_bytes()
+    for original, replacement in replacements.items():
+        if len(replacement) > len(original):
+            fail(f"embedded path replacement is too long for {path.name}")
+        occurrences = contents.count(original)
+        if occurrences != 1:
+            fail(
+                f"expected one embedded path in {path.name}, found {occurrences}: "
+                f"{original.decode()}"
+            )
+        padded_replacement = replacement + (b"\0" * (len(original) - len(replacement)))
+        contents = contents.replace(original, padded_replacement, 1)
+    path.write_bytes(contents)
+
+
+def rewrite_fixed_bytes(path: Path, replacements: dict[bytes, bytes]) -> None:
+    """Apply a same-size machine-code patch to one pinned ELF."""
+    contents = path.read_bytes()
+    for original, replacement in replacements.items():
+        if len(original) != len(replacement):
+            fail(f"machine-code replacement changes size for {path.name}")
+        occurrences = contents.count(original)
+        if occurrences != 1:
+            fail(
+                f"expected one machine-code pattern in {path.name}, found {occurrences}: "
+                f"{original.hex()}"
+            )
+        contents = contents.replace(original, replacement, 1)
+    path.write_bytes(contents)
 
 
 def check_unresolved_dependencies(patchelf: str) -> None:
@@ -432,13 +506,44 @@ def install_proot_rootfs(work_dir: Path) -> None:
     log(f"installed PRoot rootfs: {destination.name} ({destination.stat().st_size >> 20} MiB)")
 
 
+def install_angle_libraries(extract_root: Path) -> None:
+    """Install ANGLE's Vulkan and OpenGL compatibility backends."""
+    angle_root = ASSETS_VM_DIR / "angle"
+    if angle_root.exists():
+        shutil.rmtree(angle_root)
+
+    installed = 0
+    for backend in ("vulkan", "gl"):
+        source_dir_matches = list(
+            extract_root.glob(
+                f"angle-android/{TERMUX_PREFIX}/usr/opt/angle-android/{backend}"
+            )
+        )
+        if len(source_dir_matches) != 1:
+            fail(f"expected one ANGLE {backend} directory, found {len(source_dir_matches)}")
+
+        destination_dir = angle_root / backend
+        destination_dir.mkdir(parents=True)
+        for library in sorted(source_dir_matches[0].glob("*.so")):
+            shutil.copy2(library, destination_dir / library.name)
+            installed += 1
+    if installed == 0:
+        fail("ANGLE package contains no renderer libraries")
+    log(f"installed {installed} ANGLE renderer libraries into {angle_root}")
+
+
 def write_payload_manifest(closure: list[DebianPackage]) -> None:
     manifest = {
         "source": TERMUX_REPO_URL,
         "packages": {p.name: p.version for p in closure},
         "files": {},
     }
-    for directory in [JNILIBS_DIR, ASSETS_VM_DIR / "qemu", ASSETS_VM_DIR / "proot"]:
+    for directory in [
+        JNILIBS_DIR,
+        ASSETS_VM_DIR / "qemu",
+        ASSETS_VM_DIR / "proot",
+        ASSETS_VM_DIR / "angle",
+    ]:
         for file in sorted(directory.rglob("*")):
             if file.is_file():
                 key = file.relative_to(PROJECT_ROOT / "app/src/main").as_posix()
@@ -484,6 +589,7 @@ def main() -> None:
     check_unresolved_dependencies(patchelf)
     install_qemu_data_files(extract_root)
     install_proot_rootfs(work_dir)
+    install_angle_libraries(extract_root)
     write_payload_manifest(closure)
     log("payload ready — rebuild the APK to pick it up")
 

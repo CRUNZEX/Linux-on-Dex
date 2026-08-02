@@ -53,6 +53,7 @@ class ProotEngine(
     private val payloadInstaller: PayloadInstaller,
     private val rootfsInstaller: RootfsImageInstaller = RootfsImageInstaller(paths),
     private val reaper: GuestProcessReaper = GuestProcessReaper(paths),
+    private val graphicsBridge: AndroidVirglBridge = AndroidVirglBridge(paths),
 ) : VirtualizationEngine {
 
     override val kind: EngineKind = EngineKind.PROOT
@@ -69,6 +70,9 @@ class ProotEngine(
 
     /** Extracted rootfs of the active desktop session; null in legacy mode. */
     private var activeRootfsDir: File? = null
+
+    /** True only after the native renderer has published its Unix socket. */
+    private var graphicsBridgeEnabled = false
 
     /** Terminal shells spawned for the desktop mode, killed on stop. */
     private val consoleShells = CopyOnWriteArrayList<Process>()
@@ -180,6 +184,7 @@ class ProotEngine(
 
     private fun startDesktopSessionLocked(config: VmConfig, rootfsDir: File) {
         prepareSharedMemoryDir()
+        graphicsBridgeEnabled = startVerifiedGraphicsBridge(rootfsDir)
 
         _state.value = VmState.Starting(kind)
         desktopLogFile().delete() // fresh log per boot, like the QEMU engine
@@ -189,6 +194,7 @@ class ProotEngine(
             displayResolution = config.display.resolution.asGeometryText(),
             vncPort = config.vncPort,
             sharedFolderDir = paths.sharedFolderDir?.also { it.mkdirs() },
+            graphicsBridgeEnabled = graphicsBridgeEnabled,
         )
         val process = command.start(redirectErrorStream = true)
         sessionProcess = process
@@ -203,6 +209,49 @@ class ProotEngine(
             startedAtMillis = System.currentTimeMillis(),
         )
         AppLog.info(SCOPE, "desktop session up on VNC port ${config.vncPort}")
+    }
+
+    /**
+     * A listening socket is not enough: some vendor EGL stacks initialise
+     * lazily and fail only when the first guest context arrives. Probe the
+     * complete path before exporting virpipe to the desktop, trying Samsung's
+     * system EGL first and bundled ANGLE as the compatibility fallback.
+     */
+    private fun startVerifiedGraphicsBridge(rootfsDir: File): Boolean {
+        for (backend in AndroidVirglBridge.Backend.entries) {
+            if (!graphicsBridge.start(backend)) continue
+
+            val probeResult = runCatching {
+                ProotCommandFactory.graphicsProbe(paths, rootfsDir)
+                    .runAndCaptureOutput(timeoutSeconds = GRAPHICS_PROBE_TIMEOUT_SECONDS)
+            }
+            if (probeResult.isFailure) {
+                AppLog.warn(
+                    SCOPE,
+                    "${backend.displayName} guest probe failed",
+                    probeResult.exceptionOrNull(),
+                )
+                graphicsBridge.stop()
+                continue
+            }
+            val probe = probeResult.getOrThrow()
+            val reachedVirgl = probe.isSuccess &&
+                probe.output.contains("virgl", ignoreCase = true) &&
+                !probe.output.contains("llvmpipe", ignoreCase = true)
+            if (reachedVirgl && graphicsBridge.isRunning) {
+                AppLog.info(SCOPE, "guest Mesa verified through ${backend.displayName}")
+                return true
+            }
+
+            AppLog.warn(
+                SCOPE,
+                "${backend.displayName} did not produce a virgl renderer: " +
+                    probe.output.takeLast(GRAPHICS_PROBE_LOG_CHARS),
+            )
+            graphicsBridge.stop()
+        }
+        AppLog.warn(SCOPE, "native guest GPU unavailable; continuing with safe llvmpipe")
+        return false
     }
 
     /**
@@ -390,6 +439,8 @@ class ProotEngine(
 
     private fun cleanupProcesses() {
         closeConsoleShells()
+        graphicsBridge.stop()
+        graphicsBridgeEnabled = false
         sessionProcess = null
         activeRootfsDir = null
     }
@@ -415,7 +466,12 @@ class ProotEngine(
 
         return try {
             val shell = ProotCommandFactory
-                .interactiveShell(paths, rootfsDir, paths.sharedFolderDir)
+                .interactiveShell(
+                    paths = paths,
+                    rootfsDir = rootfsDir,
+                    sharedFolderDir = paths.sharedFolderDir,
+                    graphicsBridgeEnabled = graphicsBridgeEnabled && graphicsBridge.isRunning,
+                )
                 .start(redirectErrorStream = true)
             consoleShells += shell
             OwnedShellConsole(shell) { consoleShells.remove(shell) }
@@ -548,6 +604,8 @@ class ProotEngine(
         private const val VNC_POLL_INTERVAL_MS = 500L
         private const val VNC_CONNECT_TIMEOUT_MS = 400
         private const val LOG_TAIL_BYTES = 16_000
+        private const val GRAPHICS_PROBE_TIMEOUT_SECONDS = 15L
+        private const val GRAPHICS_PROBE_LOG_CHARS = 1_000
 
         /** A killed process reports 128 + the signal number. */
         private const val EXIT_CODE_SIGKILL = 137

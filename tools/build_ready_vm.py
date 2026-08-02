@@ -544,7 +544,7 @@ Flavours (each .qcow2 pairs with its <name>-seed.iso)
                                                        console only and light
                                                        (add tools with apt)
   linux-on-dex-ubuntu-24.04-desktop-xfce-arm64.qcow2   XFCE desktop (light, smooth)
-  linux-on-dex-ubuntu-24.04-desktop-gnome-arm64.qcow2  GNOME desktop (full Ubuntu)
+  linux-on-dex-ubuntu-24.04-desktop-gnome-arm64.qcow2  GNOME Flashback desktop
   linux-on-dex-<distro>-proot-arm64.rootfs.tar.gz      Console containers on
                                                        PRoot: Ubuntu, Debian,
                                                        Kali and Alpine, each
@@ -553,12 +553,17 @@ Flavours (each .qcow2 pairs with its <name>-seed.iso)
                                                        else. Alpine is 49 MB
                                                        and unpacks in a second
   linux-on-dex-ubuntu-24.04-proot-gnome-arm64.rootfs.tar.gz
-                                                       GNOME desktop on PRoot:
+                                                       GNOME Shell on PRoot:
                                                        native CPU speed (no VM),
-                                                       git + ssh + VS Code
+                                                       git + ssh + VS Code +
+                                                       Firefox
                                                        preinstalled, apt ready
-                                                       to use — the smooth
-                                                       desktop choice
+                                                       to use
+  linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz
+                                                       GNOME-like lightweight
+                                                       XFCE on PRoot: top bar,
+                                                       dock, compositor off,
+                                                       VS Code preinstalled
 
 Every flavour is preconfigured:
   - user {username} / password {password}, passwordless sudo
@@ -593,12 +598,20 @@ Or push over USB
 
 Desktops
   XFCE runs without a compositor — the smooth choice for a software VM.
-  GNOME is the full Ubuntu desktop and inherently heavier (its shell
-  composites through software GL). Both boot with cloud-init disabled:
+  GNOME uses the supported Flashback session with GNOME Panel and Metacity,
+  avoiding GNOME Shell's costly software compositor. Both boot with cloud-init disabled:
   everything is baked at build time, so the phone boots straight into
   the desktop.
 
-GNOME on PRoot (the .rootfs.tar.gz)
+GNOME-like XFCE on PRoot (recommended)
+  Import linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz.
+  The GNOME-like top bar and dock use only lightweight XFCE components. The
+  compositor, desktop manager, animations and unused service helpers stay off.
+  SSH, git, a terminal, file manager and Mesa diagnostics are included. The
+  app validates native virgl/ANGLE acceleration at every start and falls back
+  to llvmpipe only when the device's Android EGL path cannot start.
+
+GNOME Shell on PRoot
   Not a VM: the app runs this Ubuntu tree through PRoot's syscall
   translation at native CPU speed, which no emulated qcow2 desktop can
   match. Everything runs as root (PRoot has a single user), sign in over
@@ -614,7 +627,7 @@ GNOME on PRoot (the .rootfs.tar.gz)
     them as a group, which takes the X server and the desktop with them.
     A stock Ubuntu GNOME session starts more than forty processes, so it
     cannot survive here at all. This image therefore keeps only X, D-Bus,
-    sshd, gnome-session, GNOME Shell, XSettings and dconf: the sixteen
+    sshd, GNOME Shell/Mutter, XSettings and dconf: the sixteen
     settings-daemon plugins, ibus, Evolution, Online Accounts, PackageKit,
     upower, the portals and the file indexers are removed. That is what
     makes it both survivable and fast.
@@ -634,17 +647,22 @@ GNOME on PRoot (the .rootfs.tar.gz)
     Open a terminal (on the desktop, or the app's Terminal) and run:
       dex-fps            # 20 seconds, or dex-fps 60 for a longer run
     It prints the renderer in use and a measured frame rate every five
-    seconds. Expect llvmpipe: no Android device lets an app reach the GPU
-    from a container, so the CPU does the drawing — which is exactly why
-    this image turns off animations, compositing effects and blinking
-    cursors. Lowering the display resolution in the app is the single
-    biggest lever on the number you see.
+    seconds. A supported native bridge reports virgl; an unsupported Android
+    EGL path reports llvmpipe. This image turns off animations, compositing
+    effects and blinking cursors in both cases. Lowering the display resolution
+    remains the single biggest lever on the number you see.
+
+Display input and frame ceiling
+  The embedded viewer forwards DeX mouse buttons, wheel, hardware keyboard,
+  touch taps/drags and Android IME text directly over RFB. It never captures
+  the Android pointer. TigerVNC accepts up to 240 updates per second; the
+  visible rate is still capped by the phone or monitor refresh rate.
 
 Server images run one-time setup on first boot (account, disk grow), so
 that boot takes a little longer; afterwards every boot goes straight to
 a login prompt.
 """
-    (output_dir / "README.txt").write_text(notes)
+    (output_dir / "README.txt").write_text(notes, encoding="utf-8")
 
 
 def main() -> None:
@@ -663,8 +681,8 @@ def main() -> None:
         "--desktop-environment",
         choices=["xfce", "gnome"],
         default="xfce",
-        help="desktop flavour only: xfce is light and fast, gnome is the full "
-        "Ubuntu desktop (larger, heavier under software emulation)",
+        help="desktop flavour only: xfce is light and fast, gnome uses "
+        "GNOME Flashback for stable software-rendered graphics",
     )
     parser.add_argument(
         "--distro",

@@ -51,27 +51,28 @@ class VmConfigTest {
     }
 
     @Test
-    fun `the memory ceiling is the fitted size less two gigabytes`() {
+    fun `the memory ceiling is the fitted size less three gigabytes for DeX`() {
         // A 12 GB phone reports about 11122 MB, the rest reserved before
         // Linux ever sees it. The user knows they bought 12 GB, so the
-        // ceiling is 12288 - 2048.
-        assertEquals(10240, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 11122))
-        assertEquals(10240, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 12288))
-        assertEquals(6144, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 7680))
-        assertEquals(14336, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 15600))
+        // ceiling is 12288 - 3072.
+        assertEquals(9216, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 11122))
+        assertEquals(9216, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 12288))
+        assertEquals(5120, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 7680))
+        assertEquals(13312, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 15600))
         // A 10 GB device must not be rounded to 12: that would offer the
         // guest more memory than the phone is fitted with.
-        assertEquals(8192, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 9938))
+        assertEquals(7168, VmConfig.maxSafeGuestMemoryMb(deviceTotalRamMb = 9938))
     }
 
     @Test
     fun `the ceiling never exceeds what the device is fitted with`() {
-        // Every real reported size must leave Android at least its 2 GB.
+        // With the larger reserve, rounding to a fitted capacity must never
+        // offer the guest more RAM than Android reports as physically usable.
         listOf(3800, 5700, 7680, 9938, 11122, 15600, 23000).forEach { reported ->
             val ceiling = VmConfig.maxSafeGuestMemoryMb(reported)
             assertTrue(
                 "ceiling $ceiling should leave headroom on a device reporting $reported",
-                ceiling <= reported + 2048,
+                ceiling <= reported,
             )
         }
     }

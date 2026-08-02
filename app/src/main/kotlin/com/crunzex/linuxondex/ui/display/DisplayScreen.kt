@@ -2,6 +2,8 @@ package com.crunzex.linuxondex.ui.display
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -10,8 +12,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -31,14 +33,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.crunzex.linuxondex.core.AppLog
+import com.crunzex.linuxondex.display.vnc.ActiveConnectionOwner
 import com.crunzex.linuxondex.display.vnc.RfbClient
 import com.crunzex.linuxondex.display.vnc.VncView
 
@@ -60,7 +65,19 @@ fun DisplayScreen(
     // A desktop guest paints nothing for a while after the display attaches.
     // Without a hint that looks like the app has hung.
     var hasPaintedFrame by remember { mutableStateOf(false) }
-    val connectionScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    val connectionScope = remember(vncPort) {
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    }
+    val connectionOwner = remember(vncPort) { ActiveConnectionOwner<RfbClient>() }
+
+    DisposableEffect(connectionScope, connectionOwner) {
+        onDispose {
+            // A blocking socket read ignores coroutine cancellation. Close the
+            // connection first so the worker can actually leave its read loop.
+            connectionOwner.close()
+            connectionScope.cancel()
+        }
+    }
 
     Scaffold(
         containerColor = Color.Black,
@@ -80,7 +97,10 @@ fun DisplayScreen(
                     }
                     if (onOpenInNewWindow != null) {
                         IconButton(onClick = onOpenInNewWindow) {
-                            Icon(Icons.Filled.OpenInNew, contentDescription = "Open in new window")
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = "Open in new window",
+                            )
                         }
                     }
                 },
@@ -118,6 +138,7 @@ fun DisplayScreen(
                             view = view,
                             port = vncPort,
                             scope = connectionScope,
+                            connectionOwner = connectionOwner,
                             onStatus = { message -> statusText = message },
                             onFirstFrame = { hasPaintedFrame = true },
                         )
@@ -127,9 +148,6 @@ fun DisplayScreen(
             if (!hasPaintedFrame) {
                 WaitingForGuestDisplay()
             }
-        }
-        DisposableEffect(Unit) {
-            onDispose { connectionScope.cancel() }
         }
     }
 }
@@ -156,16 +174,21 @@ private fun WaitingForGuestDisplay() {
     }
 }
 
-private fun connectVnc(
+@VisibleForTesting
+fun connectVnc(
     view: VncView,
     port: Int,
     scope: CoroutineScope,
+    connectionOwner: ActiveConnectionOwner<RfbClient>,
     onStatus: (String) -> Unit,
     onFirstFrame: () -> Unit,
 ) {
     scope.launch {
-        try {
-            val client = RfbClient(
+        while (isActive) {
+            var client: RfbClient? = null
+            var statisticsJob: Job? = null
+            try {
+                val newClient = RfbClient(
                 host = "127.0.0.1",
                 port = port,
                 listener = object : RfbClient.Listener {
@@ -174,26 +197,40 @@ private fun connectVnc(
                     override fun onFramebufferReady(bitmap: Bitmap) {
                         view.onFramebufferReady(bitmap)
                         resolution = "${bitmap.width}×${bitmap.height}"
-                        view.post { onStatus(resolution) }
+                        dispatchToDisplayThread { onStatus(resolution) }
                     }
 
                     override fun onFrameUpdated() {
-                        view.post(onFirstFrame)
+                        dispatchToDisplayThread(onFirstFrame)
                         view.onFrameUpdated()
                     }
 
                     override fun onDisconnected(reason: String) {
-                        view.post { onStatus("Disconnected: $reason") }
+                        dispatchToDisplayThread { onStatus("Disconnected: $reason") }
                     }
                 },
             )
-            client.connect()
-            view.inputTarget = client
-            reportStatsWhileConnected(client, scope, onStatus)
-            client.runReadLoop() // blocks this coroutine until closed
-        } catch (error: Exception) {
-            AppLog.warn("DisplayScreen", "VNC connect failed", error)
-            view.post { onStatus("Connection failed: ${error.message}") }
+                client = newClient
+                if (!connectionOwner.attach(newClient)) return@launch
+
+                newClient.connect()
+                dispatchToDisplayThread { view.bindInputTarget(newClient) }
+                statisticsJob = reportStatsWhileConnected(newClient, scope, view, onStatus)
+                newClient.runReadLoop() // blocks this coroutine until closed
+            } catch (error: Exception) {
+                AppLog.warn("DisplayScreen", "VNC connect failed", error)
+                dispatchToDisplayThread { onStatus("Connection interrupted · reconnecting…") }
+            } finally {
+                statisticsJob?.cancel()
+                client?.let { completedClient ->
+                    connectionOwner.detach(completedClient)
+                    completedClient.close()
+                    dispatchToDisplayThread { view.unbindInputTarget(completedClient) }
+                }
+            }
+            if (!isActive) break
+            dispatchToDisplayThread { onStatus("Reconnecting display…") }
+            delay(RECONNECT_DELAY_MILLIS)
         }
     }
 }
@@ -203,22 +240,30 @@ private fun connectVnc(
  * so display performance is visible rather than a matter of opinion.
  *
  * A quiet desktop produces no frames at all (animations and cursor blink
- * are off by design), so zero is reported as "idle" — "0 fps" reads as
+ * are off by design), so zero is reported as "ready" — "0 fps" reads as
  * broken when it actually means "nothing needed redrawing".
  */
 private fun reportStatsWhileConnected(
     client: RfbClient,
     scope: CoroutineScope,
+    view: VncView,
     onStatus: (String) -> Unit,
-) {
-    scope.launch {
+) = scope.launch {
         val resolution = "${client.framebufferWidth}×${client.framebufferHeight}"
         while (isActive) {
             delay(STATS_REFRESH_MILLIS)
             val framesPerSecond = client.currentStats().framesPerSecond
-            val activity = if (framesPerSecond > 0) "$framesPerSecond fps" else "idle"
-            onStatus("$resolution · $activity")
+            val activity = if (framesPerSecond > 0) "$framesPerSecond fps" else "ready"
+            dispatchToDisplayThread { onStatus("$resolution · $activity") }
         }
+}
+
+/** UI callbacks must not depend on the VNC view already being attached. */
+private fun dispatchToDisplayThread(action: () -> Unit) {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+        action()
+    } else {
+        DISPLAY_HANDLER.post(action)
     }
 }
 
@@ -229,3 +274,5 @@ private fun toggleSoftKeyboard(view: VncView) {
 }
 
 private const val STATS_REFRESH_MILLIS = 1_000L
+private const val RECONNECT_DELAY_MILLIS = 500L
+private val DISPLAY_HANDLER = Handler(Looper.getMainLooper())

@@ -10,9 +10,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
-    <!-- The Monitor screen lists plugged-in USB devices (view only; nothing
-         is ever attached to the VM). Not required, so the app still installs
-         on devices without USB-host support; the list is simply empty. -->
+    <!-- Lists plugged-in USB devices and, after explicit Android consent,
+         can pass selected devices to QEMU. Not required, so the app still
+         installs on phones without USB-host support. -->
     <uses-feature
         android:name="android.hardware.usb.host"
         android:required="false" />

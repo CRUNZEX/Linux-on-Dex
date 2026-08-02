@@ -119,7 +119,18 @@ def compact_into(staging_disk: Path, output_disk: Path) -> None:
     output_disk.parent.mkdir(parents=True, exist_ok=True)
     output_disk.unlink(missing_ok=True)
     _run_checked(
-        [qemu_img, "convert", "-O", "qcow2", str(staging_disk), str(output_disk)],
+        [
+            qemu_img,
+            "convert",
+            "-p",
+            "-c",
+            "-O",
+            "qcow2",
+            "-o",
+            "compat=1.1,compression_type=zlib",
+            str(staging_disk),
+            str(output_disk),
+        ],
         failure_message="compacting the finished image",
     )
 

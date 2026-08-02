@@ -89,12 +89,14 @@ class QmpClient private constructor(
      * native QMP command, but `hostfwd_add` has been stable for years.
      */
     fun addPortForward(slirpSpecification: String) {
-        humanMonitorCommand("hostfwd_add net0 $slirpSpecification")
+        requireEmptyHumanMonitorResult("hostfwd_add net0 $slirpSpecification")
     }
 
     /** Removes a live forward; identified by protocol and host binding. */
     fun removePortForward(protocol: String, hostPort: Int) {
-        humanMonitorCommand("hostfwd_remove net0 $protocol:127.0.0.1:$hostPort")
+        requireEmptyHumanMonitorResult(
+            "hostfwd_remove net0 $protocol:127.0.0.1:$hostPort"
+        )
     }
 
     /**
@@ -154,18 +156,29 @@ class QmpClient private constructor(
         }
     }
 
+    /** Human-readable guest USB bus contents, used by hardware integration tests. */
+    fun queryUsbDevices(): String = executeHumanMonitorCommand("info usb")
+
     /**
      * HMP passthrough. Unlike QMP proper, HMP reports failure as TEXT in
      * the return value, so anything non-blank is treated as an error.
      */
-    private fun humanMonitorCommand(commandLine: String) {
+    private fun requireEmptyHumanMonitorResult(commandLine: String) {
+        val output = executeHumanMonitorCommand(commandLine)
+        if (output.isNotBlank()) {
+            throw LxdError.ControlChannelFailed("'$commandLine' failed: $output")
+        }
+    }
+
+    /**
+     * Returns HMP text verbatim. Mutation commands normally return an empty
+     * string, while queries such as `info usb` intentionally return content.
+     */
+    private fun executeHumanMonitorCommand(commandLine: String): String {
         val reply = execute("human-monitor-command") {
             put("command-line", commandLine)
         }
-        val output = reply["return"]?.toString()?.trim('"')?.replace("\\r\\n", " ")?.trim()
-        if (!output.isNullOrBlank()) {
-            throw LxdError.ControlChannelFailed("'$commandLine' failed: $output")
-        }
+        return reply["return"]?.jsonPrimitive?.content.orEmpty().trim()
     }
 
     private fun execute(
@@ -221,6 +234,7 @@ class QmpClient private constructor(
                         LocalSocketAddress.Namespace.FILESYSTEM,
                     )
                 )
+                socket.soTimeout = SOCKET_TIMEOUT_MILLIS
                 val reader = BufferedReader(InputStreamReader(socket.inputStream))
                 val writer = OutputStreamWriter(socket.outputStream)
                 val greeting = reader.readLine()
@@ -238,5 +252,7 @@ class QmpClient private constructor(
                 throw LxdError.ControlChannelFailed("connect to ${socketFile.name}", error)
             }
         }
+
+        private const val SOCKET_TIMEOUT_MILLIS = 5_000
     }
 }

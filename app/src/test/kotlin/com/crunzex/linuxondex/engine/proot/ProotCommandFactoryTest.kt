@@ -121,13 +121,58 @@ class ProotCommandFactoryTest {
     }
 
     @Test
+    fun `native graphics bridge binds only its socket and selects virpipe`() {
+        val command = ProotCommandFactory.desktopSession(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            displayResolution = "1280x800",
+            vncPort = 5901,
+            sharedFolderDir = null,
+            graphicsBridgeEnabled = true,
+        )
+
+        assertTrue(
+            command.arguments.zipWithNext().any { (flag, bind) ->
+                flag == "-b" && bind ==
+                    "${paths.virglSocket}:${ProotCommandFactory.VIRGL_SOCKET_GUEST_PATH}"
+            },
+        )
+        assertEquals("1", command.environment["DEX_GPU_BRIDGE"])
+        assertEquals("virpipe", command.environment["GALLIUM_DRIVER"])
+        assertEquals(
+            ProotCommandFactory.VIRGL_SOCKET_GUEST_PATH,
+            command.environment["VTEST_SOCKET_NAME"],
+        )
+    }
+
+    @Test
+    fun `software fallback does not force virpipe`() {
+        val environment = desktopCommand().environment
+
+        assertNull(environment["DEX_GPU_BRIDGE"])
+        assertNull(environment["GALLIUM_DRIVER"])
+        assertNull(environment["VTEST_SOCKET_NAME"])
+    }
+
+    @Test
     fun `interactive shell enters the same rootfs under a pseudo-terminal`() {
         val command = ProotCommandFactory.interactiveShell(paths, rootfsDir, null)
 
         assertEquals(
             "without a pty there is no prompt, no echo and no stty",
-            listOf("/usr/bin/script", "-q", "-c", "/bin/bash -l", "/dev/null"),
+            listOf(
+                "/usr/bin/script",
+                "-q",
+                "-c",
+                ProotCommandFactory.INTERACTIVE_LOGIN_COMMAND,
+                "/dev/null",
+            ),
             command.arguments.takeLast(5),
+        )
+        assertTrue(
+            "Android group IDs must be named before bash displays the prompt",
+            ProotCommandFactory.INTERACTIVE_LOGIN_COMMAND.indexOf("dex-name-groups") <
+                ProotCommandFactory.INTERACTIVE_LOGIN_COMMAND.indexOf("/bin/bash"),
         )
         assertTrue(command.arguments.contains(rootfsDir.absolutePath))
         assertEquals("xterm-256color", command.environment["TERM"])
