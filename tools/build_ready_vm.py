@@ -544,7 +544,26 @@ Flavours (each .qcow2 pairs with its <name>-seed.iso)
                                                        console only and light
                                                        (add tools with apt)
   linux-on-dex-ubuntu-24.04-desktop-xfce-arm64.qcow2   XFCE desktop (light, smooth)
-  linux-on-dex-ubuntu-24.04-desktop-gnome-arm64.qcow2  GNOME desktop (full Ubuntu)
+  linux-on-dex-ubuntu-24.04-desktop-gnome-arm64.qcow2  GNOME Flashback desktop
+  linux-on-dex-<distro>-proot-arm64.rootfs.tar.gz      Console containers on
+                                                       PRoot: Ubuntu, Debian,
+                                                       Kali and Alpine, each
+                                                       with a working package
+                                                       manager and nothing
+                                                       else. Alpine is 49 MB
+                                                       and unpacks in a second
+  linux-on-dex-ubuntu-24.04-proot-gnome-arm64.rootfs.tar.gz
+                                                       GNOME Shell on PRoot:
+                                                       native CPU speed (no VM),
+                                                       git + ssh + VS Code +
+                                                       Firefox
+                                                       preinstalled, apt ready
+                                                       to use
+  linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz
+                                                       GNOME-like lightweight
+                                                       XFCE on PRoot: top bar,
+                                                       dock, compositor off,
+                                                       VS Code preinstalled
 
 Every flavour is preconfigured:
   - user {username} / password {password}, passwordless sudo
@@ -579,32 +598,91 @@ Or push over USB
 
 Desktops
   XFCE runs without a compositor — the smooth choice for a software VM.
-  GNOME is the full Ubuntu desktop and inherently heavier (its shell
-  composites through software GL). Both boot with cloud-init disabled:
+  GNOME uses the supported Flashback session with GNOME Panel and Metacity,
+  avoiding GNOME Shell's costly software compositor. Both boot with cloud-init disabled:
   everything is baked at build time, so the phone boots straight into
   the desktop.
+
+GNOME-like XFCE on PRoot (recommended)
+  Import linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz.
+  The GNOME-like top bar and dock use only lightweight XFCE components. The
+  compositor, desktop manager, animations and unused service helpers stay off.
+  SSH, git, a terminal, file manager and Mesa diagnostics are included. The
+  app validates native virgl/ANGLE acceleration at every start and falls back
+  to llvmpipe only when the device's Android EGL path cannot start.
+
+GNOME Shell on PRoot
+  Not a VM: the app runs this Ubuntu tree through PRoot's syscall
+  translation at native CPU speed, which no emulated qcow2 desktop can
+  match. Everything runs as root (PRoot has a single user), sign in over
+  ssh with root/{password} on 127.0.0.1:8022, and VS Code launches
+  sandbox-free (a PRoot necessity). The first start extracts the archive
+  once — under a minute, with a progress bar — and every start after that
+  goes straight to the desktop. The app's terminal windows open shells
+  into the same system.
+
+  Why this image runs so few background services
+    Android 12 and newer kill an app's forked child processes once they
+    pass a limit (max_phantom_processes, 32 by default) — and they kill
+    them as a group, which takes the X server and the desktop with them.
+    A stock Ubuntu GNOME session starts more than forty processes, so it
+    cannot survive here at all. This image therefore keeps only X, D-Bus,
+    sshd, GNOME Shell/Mutter, XSettings and dconf: the sixteen
+    settings-daemon plugins, ibus, Evolution, Online Accounts, PackageKit,
+    upower, the portals and the file indexers are removed. That is what
+    makes it both survivable and fast.
+
+    If you still hit the limit while running something process-heavy, the
+    monitor can be switched off over adb (no root needed):
+      adb shell settings put global settings_enable_monitor_phantom_procs false
+
+  Installing your own packages
+    apt works out of the box: the image fetches as root (PRoot cannot hand
+    file ownership to apt's unprivileged helper, so the helper could not read
+    what it had just downloaded), skips HTTP pipelining, retries three times
+    and keeps apt's and dpkg's working directories present. Just:
+      apt update && apt install <package>
+
+  Measuring smoothness on your own device
+    Open a terminal (on the desktop, or the app's Terminal) and run:
+      dex-fps            # 20 seconds, or dex-fps 60 for a longer run
+    It prints the renderer in use and a measured frame rate every five
+    seconds. A supported native bridge reports virgl; an unsupported Android
+    EGL path reports llvmpipe. This image turns off animations, compositing
+    effects and blinking cursors in both cases. Lowering the display resolution
+    remains the single biggest lever on the number you see.
+
+Display input and frame ceiling
+  The embedded viewer forwards DeX mouse buttons, wheel, hardware keyboard,
+  touch taps/drags and Android IME text directly over RFB. It never captures
+  the Android pointer. TigerVNC accepts up to 240 updates per second; the
+  visible rate is still capped by the phone or monitor refresh rate.
 
 Server images run one-time setup on first boot (account, disk grow), so
 that boot takes a little longer; afterwards every boot goes straight to
 a login prompt.
 """
-    (output_dir / "README.txt").write_text(notes)
+    (output_dir / "README.txt").write_text(notes, encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--flavour",
-        choices=["server", "desktop"],
+        choices=["server", "desktop", "proot-gnome", "proot-server"],
         default="server",
-        help="server boots to a shell; desktop installs a graphical environment",
+        help="server boots to a shell; desktop installs a graphical "
+        "environment into a qcow2 VM disk; proot-gnome bakes an Ubuntu GNOME "
+        "rootfs archive for the app's native-speed PRoot container; "
+        "proot-server bakes a console-only container for --distro "
+        "(ubuntu, debian, kali or alpine)",
     )
     parser.add_argument(
         "--desktop-environment",
         choices=["xfce", "gnome"],
         default="xfce",
-        help="desktop flavour only: xfce is light and fast, gnome is the full "
-        "Ubuntu desktop (larger, heavier under software emulation)",
+        help="desktop flavour only: xfce is light and fast, gnome uses "
+        "GNOME Flashback for stable software-rendered graphics",
     )
     parser.add_argument(
         "--distro",
@@ -635,9 +713,9 @@ def main() -> None:
 
     distro: str = arguments.distro
     release: str = arguments.release or DEFAULT_RELEASES[distro]
-    if arguments.flavour == "desktop" and distro != "ubuntu":
-        fail("the desktop flavour is Ubuntu-based; use --distro ubuntu")
-    if distro in ALPINE_DISTROS and arguments.flavour != "server":
+    if arguments.flavour in ("desktop", "proot-gnome") and distro != "ubuntu":
+        fail(f"the {arguments.flavour} flavour is Ubuntu-based; use --distro ubuntu")
+    if distro in ALPINE_DISTROS and arguments.flavour not in ("server", "proot-server"):
         fail("alpine flavours are console images; drop --flavour desktop")
 
     # Both Alpine flavours start from the identical base image; share the
@@ -654,6 +732,31 @@ def main() -> None:
 
     output_dir: Path = arguments.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if arguments.flavour == "proot-server":
+        # A console container, like the GNOME one but without a desktop: it
+        # needs no cloud-init seed on the phone, because everything it will
+        # ever be configured with is baked in here.
+        archive = output_dir / (
+            f"linux-on-dex-{distro}-{release}-proot-arm64.rootfs.tar.gz"
+        )
+        build_proot_server_flavour(cloud_image, archive, distro, arguments)
+        write_install_notes(output_dir, arguments.username, arguments.password)
+        log(f"done — {archive}")
+        return
+
+    if arguments.flavour == "proot-gnome":
+        # A rootfs archive, not a disk: it needs no cloud-init seed — its
+        # whole configuration is baked in, and PRoot never runs cloud-init.
+        archive = output_dir / (
+            f"linux-on-dex-{distro}-{release}-proot-gnome-arm64.rootfs.tar.gz"
+        )
+        build_proot_gnome_flavour(cloud_image, archive, arguments)
+        write_install_notes(output_dir, arguments.username, arguments.password)
+        log(f"done — {archive}")
+        log(f"desktop + ssh sign-in: root/{arguments.password}")
+        return
+
     # e.g. "" (server), "-desktop-xfce", "-desktop-gnome" — so different
     # flavours never overwrite each other's disk.
     flavour_suffix = (
@@ -730,6 +833,61 @@ def build_kali_flavour(cloud_image: Path, root_disk: Path, arguments) -> None:
                 work_directory=arguments.cache_dir / "kali-build",
                 disk_size=arguments.disk_size,
                 username=arguments.username,
+                password=arguments.password,
+            )
+        )
+    except ImageBakeError as error:
+        fail(str(error))
+
+
+def build_proot_server_flavour(
+    cloud_image: Path,
+    output_archive: Path,
+    distro: str,
+    arguments,
+) -> None:
+    """Bakes one console-only container: Ubuntu, Debian, Kali or Alpine."""
+    from cloud_image_bake import ImageBakeError
+    from proot_server_builder import (
+        SERVER_DISTROS,
+        ProotServerBuildRequest,
+        build_proot_server_rootfs,
+    )
+
+    server_distro = SERVER_DISTROS.get(distro)
+    if server_distro is None:
+        fail(
+            f"'{distro}' has no console container recipe; "
+            f"choose from {', '.join(sorted(SERVER_DISTROS))}"
+        )
+
+    try:
+        build_proot_server_rootfs(
+            ProotServerBuildRequest(
+                distro=server_distro,
+                base_cloud_image=cloud_image,
+                output_archive=output_archive,
+                work_directory=arguments.cache_dir / f"proot-server-{distro}",
+            )
+        )
+    except ImageBakeError as error:
+        fail(str(error))
+
+
+def build_proot_gnome_flavour(cloud_image: Path, output_archive: Path, arguments) -> None:
+    """Bakes the Ubuntu GNOME rootfs archive for the PRoot container."""
+    from cloud_image_bake import ImageBakeError
+    from proot_rootfs_builder import (
+        ProotDesktopBuildRequest,
+        build_proot_desktop_rootfs,
+    )
+
+    try:
+        build_proot_desktop_rootfs(
+            ProotDesktopBuildRequest(
+                base_cloud_image=cloud_image,
+                output_archive=output_archive,
+                work_directory=arguments.cache_dir / "proot-gnome-build",
                 password=arguments.password,
             )
         )

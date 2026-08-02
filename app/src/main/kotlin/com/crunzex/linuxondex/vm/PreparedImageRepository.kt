@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.core.LxdError
+import com.crunzex.linuxondex.engine.proot.RootfsImageInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.vm.iso.CloudInitSeedBuilder
 import java.io.File
@@ -16,11 +17,16 @@ data class PreparedImage(
     val diskFile: File,
     val seedFile: File?,
 ) {
+    /** What the file is, deciding which engine boots it. */
+    val format: PreparedImageFormat =
+        PreparedImageFormat.fromFileName(diskFile.name) ?: PreparedImageFormat.QCOW2_DISK
+
     val displayName: String get() = prettifyFileName(diskFile.name)
     val sizeMb: Long get() = diskFile.length() shr 20
 
     /** "linux-on-dex-ubuntu-24.04-arm64.qcow2" -> "Ubuntu 24.04 arm64". */
     private fun prettifyFileName(fileName: String): String = fileName
+        .removeSuffix(PreparedImageFormat.ROOTFS_ARCHIVE_SUFFIX)
         .removeSuffix(".qcow2")
         .removeSuffix(".img")
         .removePrefix("linux-on-dex-")
@@ -39,6 +45,7 @@ class PreparedImageRepository(
     private val context: Context,
     private val paths: VmPaths,
 ) {
+    private val rootfsInstaller by lazy { RootfsImageInstaller(paths) }
 
     fun listAvailable(): List<PreparedImage> {
         val directory = paths.vmImagesDir ?: return emptyList()
@@ -46,9 +53,17 @@ class PreparedImageRepository(
 
         val files = directory.listFiles().orEmpty().filter(File::isFile)
         return files
-            .filter { it.extension.lowercase() in DISK_EXTENSIONS }
+            .filter { PreparedImageFormat.fromFileName(it.name) != null }
             .sortedBy { it.name.lowercase() }
-            .map { diskFile -> PreparedImage(diskFile, findSeedFor(diskFile, files)) }
+            .map { imageFile ->
+                val image = PreparedImage(imageFile, seedFile = null)
+                // Only disks boot through cloud-init; a rootfs needs no seed.
+                if (image.format == PreparedImageFormat.QCOW2_DISK) {
+                    image.copy(seedFile = findSeedFor(imageFile, files))
+                } else {
+                    image
+                }
+            }
     }
 
     /**
@@ -70,6 +85,8 @@ class PreparedImageRepository(
 
         val fileName = sanitizeFileName(queryDisplayName(documentUri) ?: DEFAULT_IMAGE_NAME)
         val destination = uniqueDestination(directory, fileName)
+        val format = PreparedImageFormat.fromFileName(destination.name)
+            ?: PreparedImageFormat.QCOW2_DISK
         val temporary = File(directory, destination.name + ".part")
 
         try {
@@ -82,16 +99,22 @@ class PreparedImageRepository(
                     copyReportingProgress(source, sink, totalBytes, onProgress)
                 }
             }
-            requireLooksLikeDiskImage(temporary)
+            requireLooksLikeImage(temporary, format)
             if (!temporary.renameTo(destination)) {
                 throw LxdError.StorageFailed("rename ${temporary.name} → ${destination.name}")
             }
 
-            val seedFile = CloudInitSeedBuilder.build(
-                outputFile = seedFileFor(destination),
-                username = username,
-                password = password,
-            )
+            // Only disks boot through cloud-init; a rootfs archive carries
+            // its whole configuration inside and needs no seed.
+            val seedFile = if (format == PreparedImageFormat.QCOW2_DISK) {
+                CloudInitSeedBuilder.build(
+                    outputFile = seedFileFor(destination),
+                    username = username,
+                    password = password,
+                )
+            } else {
+                null
+            }
             AppLog.info(SCOPE, "imported ${destination.name} (${destination.length() shr 20} MiB)")
             return PreparedImage(destination, seedFile)
         } catch (error: LxdError) {
@@ -108,6 +131,11 @@ class PreparedImageRepository(
         if (!image.diskFile.delete()) {
             throw LxdError.StorageFailed("delete ${image.displayName}")
         }
+        if (image.format == PreparedImageFormat.PROOT_ROOTFS) {
+            // The extracted tree is gigabytes; deleting the archive without
+            // it would silently keep paying for an image that is gone.
+            rootfsInstaller.deleteExtraction(image.diskFile)
+        }
     }
 
     /** Builds the config a VM needs to boot [image] with no installer. */
@@ -115,6 +143,7 @@ class PreparedImageRepository(
         displayName = image.displayName,
         diskImagePath = image.diskFile.absolutePath,
         seedIsoPath = image.seedFile?.absolutePath,
+        format = image.format,
     )
 
     /**
@@ -133,23 +162,36 @@ class PreparedImageRepository(
 
     /**
      * Rejects an obviously wrong pick before it becomes a failed boot. qcow2
-     * images start with the magic "QFI\xFB"; raw images have no signature, so
-     * they are accepted on size alone.
+     * images start with the magic "QFI\xFB"; rootfs archives are gzip
+     * streams; raw .img disks have no signature and pass on size alone.
      */
-    private fun requireLooksLikeDiskImage(file: File) {
+    private fun requireLooksLikeImage(file: File, format: PreparedImageFormat) {
         if (file.length() < MIN_PLAUSIBLE_IMAGE_BYTES) {
             throw LxdError.StorageFailed(
                 "the selected file is only ${file.length() shr 10} KB — too small " +
-                    "to be a virtual machine disk"
+                    "to be a virtual machine image"
             )
         }
-        val header = ByteArray(QCOW2_MAGIC.size)
+        val header = ByteArray(MAGIC_HEADER_BYTES)
         file.inputStream().use { it.read(header) }
-        val isQcow2 = header.contentEquals(QCOW2_MAGIC)
-        if (!isQcow2 && file.extension.lowercase() == "qcow2") {
-            throw LxdError.StorageFailed(
-                "the selected file is named .qcow2 but is not a qcow2 image"
-            )
+        when (format) {
+            PreparedImageFormat.QCOW2_DISK -> {
+                val isQcow2 = header.copyOf(QCOW2_MAGIC.size).contentEquals(QCOW2_MAGIC)
+                if (!isQcow2 && file.extension.lowercase() == "qcow2") {
+                    throw LxdError.StorageFailed(
+                        "the selected file is named .qcow2 but is not a qcow2 image"
+                    )
+                }
+            }
+            PreparedImageFormat.PROOT_ROOTFS -> {
+                val isGzip = header.copyOf(GZIP_MAGIC.size).contentEquals(GZIP_MAGIC)
+                if (!isGzip) {
+                    throw LxdError.StorageFailed(
+                        "the selected file is named ${PreparedImageFormat.ROOTFS_ARCHIVE_SUFFIX} " +
+                            "but is not a gzip archive"
+                    )
+                }
+            }
         }
     }
 
@@ -216,21 +258,41 @@ class PreparedImageRepository(
     /** Keeps only safe characters; guards against path traversal from names. */
     private fun sanitizeFileName(raw: String): String {
         val cleaned = raw.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
-        val hasKnownExtension = DISK_EXTENSIONS.any { cleaned.lowercase().endsWith(".$it") }
-        val named = if (hasKnownExtension) cleaned else "$cleaned.qcow2"
-        return named.take(MAX_FILE_NAME_LENGTH)
+        val named = if (PreparedImageFormat.fromFileName(cleaned) != null) {
+            cleaned
+        } else {
+            "$cleaned.qcow2"
+        }
+        // The suffix decides the format, so truncation must spare it.
+        return if (named.length <= MAX_FILE_NAME_LENGTH) named else {
+            val suffix = knownSuffixOf(named)
+            named.take(MAX_FILE_NAME_LENGTH - suffix.length) + suffix
+        }
     }
 
     private fun uniqueDestination(directory: File, fileName: String): File {
         var candidate = File(directory, fileName)
         var counter = 1
         while (candidate.exists()) {
-            val base = fileName.substringBeforeLast('.')
-            val extension = fileName.substringAfterLast('.', "qcow2")
-            candidate = File(directory, "$base-$counter.$extension")
+            // Number before the whole suffix: "x-1.rootfs.tar.gz", never
+            // "x.rootfs.tar-1.gz" (which would no longer read as a rootfs).
+            val suffix = knownSuffixOf(fileName)
+            val base = fileName.removeSuffix(suffix)
+            candidate = File(directory, "$base-$counter$suffix")
             counter++
         }
         return candidate
+    }
+
+    /** The format-bearing suffix, e.g. ".rootfs.tar.gz" or ".qcow2". */
+    private fun knownSuffixOf(fileName: String): String {
+        val lower = fileName.lowercase()
+        return when {
+            lower.endsWith(PreparedImageFormat.ROOTFS_ARCHIVE_SUFFIX) ->
+                PreparedImageFormat.ROOTFS_ARCHIVE_SUFFIX
+            lower.contains('.') -> "." + fileName.substringAfterLast('.')
+            else -> ""
+        }
     }
 
     companion object {
@@ -244,8 +306,9 @@ class PreparedImageRepository(
         private const val FREE_SPACE_HEADROOM_BYTES = 512L shl 20
         private const val MIN_PLAUSIBLE_IMAGE_BYTES = 1L shl 20
 
-        private val DISK_EXTENSIONS = setOf("qcow2", "img")
         private val QCOW2_MAGIC = byteArrayOf(0x51, 0x46, 0x49, 0xFB.toByte()) // "QFI\xFB"
+        private val GZIP_MAGIC = byteArrayOf(0x1F, 0x8B.toByte())
+        private const val MAGIC_HEADER_BYTES = 4
 
         /** Reported when the provider does not disclose the file size. */
         const val UNKNOWN_PROGRESS = -1f

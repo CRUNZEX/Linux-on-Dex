@@ -13,8 +13,10 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.crunzex.linuxondex.LinuxOnDexApp
 import com.crunzex.linuxondex.R
@@ -32,16 +34,23 @@ class VmService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var wakeLock: PowerManager.WakeLock? = null
     private var stateObserverStarted = false
+    private var recoveryJob: Job? = null
+    private val prootRecoveryPolicy = ProotRecoveryPolicy()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        AppLog.info(SCOPE, "received ${intent?.action ?: "null action"} (startId=$startId)")
         when (intent?.action) {
             ACTION_START_VM -> handleStart()
-            ACTION_STOP_VM -> handleStop()
+            ACTION_STOP_VM -> handleStop(intent.getStringExtra(EXTRA_STOP_ORIGIN))
             else -> AppLog.warn(SCOPE, "unknown action: ${intent?.action}")
         }
-        return START_NOT_STICKY
+        // If Android reclaims the app process under desktop load, replay the
+        // command that owned this foreground runtime. A fresh process then
+        // cleans any orphaned guest children and starts the selected session
+        // again instead of leaving DeX with a silently dead desktop.
+        return START_REDELIVER_INTENT
     }
 
     private fun handleStart() {
@@ -63,7 +72,8 @@ class VmService : Service() {
         }
     }
 
-    private fun handleStop() {
+    private fun handleStop(origin: String?) {
+        AppLog.info(SCOPE, "stop requested from ${origin ?: "unknown origin"}")
         val controller = (application as LinuxOnDexApp).container.vmController
         serviceScope.launch {
             try {
@@ -100,10 +110,46 @@ class VmService : Service() {
                         updateNotification(getString(R.string.notification_vm_running))
                     }
                     is VmState.Stopping -> updateNotification("Shutting down…")
-                    is VmState.Stopped, is VmState.Failed, VmState.Idle -> {
+                    is VmState.Failed -> {
+                        if (!vmWasLive) return@collect
+                        val recoveryDelayMillis = prootRecoveryPolicy.nextDelayMillis(
+                            controller.activeEngineKind.value,
+                        )
+                        if (recoveryDelayMillis == null) {
+                            windDown()
+                        } else {
+                            scheduleProotRecovery(controller, recoveryDelayMillis)
+                        }
+                    }
+                    is VmState.Stopped, VmState.Idle -> {
                         if (vmWasLive) windDown()
                     }
                 }
+            }
+        }
+    }
+
+    /** Restarts only PRoot, and only a bounded number of times. */
+    private fun scheduleProotRecovery(
+        controller: com.crunzex.linuxondex.vm.VmController,
+        recoveryDelayMillis: Long,
+    ) {
+        if (recoveryJob?.isActive == true) return
+        AppLog.warn(
+            SCOPE,
+            "PRoot session ended unexpectedly; restarting in ${recoveryDelayMillis}ms",
+        )
+        updateNotification("Recovering Linux desktop…")
+        recoveryJob = serviceScope.launch {
+            delay(recoveryDelayMillis)
+            if (controller.vmState.value !is VmState.Failed) return@launch
+            try {
+                controller.startPrimaryVm()
+            } catch (error: Exception) {
+                // VmController publishes Failed with the precise reason. Its
+                // state observer schedules the next bounded attempt or winds
+                // this service down after the recovery budget is exhausted.
+                AppLog.error(SCOPE, "automatic PRoot recovery failed", error)
             }
         }
     }
@@ -133,7 +179,9 @@ class VmService : Service() {
         val stopIntent = PendingIntent.getService(
             this,
             1,
-            Intent(this, VmService::class.java).setAction(ACTION_STOP_VM),
+            Intent(this, VmService::class.java)
+                .setAction(ACTION_STOP_VM)
+                .putExtra(EXTRA_STOP_ORIGIN, STOP_ORIGIN_NOTIFICATION),
             PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -187,6 +235,9 @@ class VmService : Service() {
         private const val WAKE_LOCK_TAG = "LinuxOnDex:vm"
         private const val ACTION_START_VM = "com.crunzex.linuxondex.action.START_VM"
         private const val ACTION_STOP_VM = "com.crunzex.linuxondex.action.STOP_VM"
+        private const val EXTRA_STOP_ORIGIN = "stop_origin"
+        private const val STOP_ORIGIN_NOTIFICATION = "notification"
+        private const val STOP_ORIGIN_APP_UI = "app UI"
 
         fun requestStart(context: Context) {
             val intent = Intent(context, VmService::class.java).setAction(ACTION_START_VM)
@@ -194,7 +245,9 @@ class VmService : Service() {
         }
 
         fun requestStop(context: Context) {
-            val intent = Intent(context, VmService::class.java).setAction(ACTION_STOP_VM)
+            val intent = Intent(context, VmService::class.java)
+                .setAction(ACTION_STOP_VM)
+                .putExtra(EXTRA_STOP_ORIGIN, STOP_ORIGIN_APP_UI)
             context.startService(intent)
         }
     }

@@ -41,6 +41,7 @@ __pycache__/
 Thumbs.db
 
 # ---- Local scratch: reference APK/ISOs and working notes ----------------------
-test/
+# The root-level scratch directory only — never the app's test sources.
+/test/
 markdown/
 *.log

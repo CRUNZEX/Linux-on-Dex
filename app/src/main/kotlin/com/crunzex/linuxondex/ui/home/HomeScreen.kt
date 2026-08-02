@@ -60,6 +60,8 @@ import com.crunzex.linuxondex.ui.components.SectionCaption
 import com.crunzex.linuxondex.ui.components.rememberDexModeActive
 import com.crunzex.linuxondex.ui.components.StatusDot
 import com.crunzex.linuxondex.ui.components.VerticalSpace
+import com.crunzex.linuxondex.vm.PreparedImageConfig
+import com.crunzex.linuxondex.vm.PreparedImageFormat
 import com.crunzex.linuxondex.ui.main.MainUiState
 import com.crunzex.linuxondex.ui.theme.OneUiPalette
 import com.crunzex.linuxondex.vm.VmState
@@ -296,20 +298,23 @@ private fun QuickStartCard(uiState: MainUiState, onOpenSetup: () -> Unit) {
                 modifier = Modifier.clickable(onClick = onOpenSetup),
             )
         } else {
+            val isContainer = prepared.format == PreparedImageFormat.PROOT_ROOTFS
             ListRow(
                 title = prepared.displayName,
-                subtitle = if (prepared.firstBootCompleted) {
-                    "Configured — starts straight to a login prompt"
-                } else {
-                    "First start runs a one-time setup"
-                },
+                subtitle = describePreparedImageReadiness(prepared, uiState.isRootfsExtracted),
                 leading = { Icon(Icons.Filled.Bolt, null, tint = MaterialTheme.colorScheme.primary) },
             )
             RowDivider()
             ListRow(
                 title = "Sign in",
-                subtitle = "Password: ${prepared.password} · passwordless sudo",
-                value = prepared.username,
+                // A container has a single user and no login prompt; the
+                // credentials only matter for its SSH server.
+                subtitle = if (isContainer) {
+                    "Password: ${prepared.password} · for SSH on port 8022"
+                } else {
+                    "Password: ${prepared.password} · passwordless sudo"
+                },
+                value = if (isContainer) "root" else prepared.username,
                 valueColor = MaterialTheme.colorScheme.primary,
             )
         }
@@ -457,17 +462,48 @@ private fun ResourceMonitorGroup(usage: VmResourceUsage?, onOpenMonitor: () -> U
 private fun formatMemoryMb(megabytes: Int): String =
     if (megabytes >= 1024) "%.1f GB".format(megabytes / 1024f) else "$megabytes MB"
 
+/**
+ * What the next start will have to do first, so a multi-minute extraction
+ * is never a surprise.
+ *
+ * A container is ready once its archive has been unpacked; a disk image is
+ * ready once cloud-init has run on it. The two use different mechanisms and
+ * neither one's readiness flag means anything for the other.
+ */
+private fun describePreparedImageReadiness(
+    prepared: PreparedImageConfig,
+    isRootfsExtracted: Boolean,
+): String = when {
+    prepared.format == PreparedImageFormat.PROOT_ROOTFS && isRootfsExtracted ->
+        "Ready — starts straight to the desktop"
+    prepared.format == PreparedImageFormat.PROOT_ROOTFS ->
+        "First start unpacks the desktop once (a few minutes)"
+    prepared.firstBootCompleted -> "Configured — starts straight to a login prompt"
+    else -> "First start runs a one-time setup"
+}
+
+/**
+ * The engine the next start will actually use: the running one while a
+ * session is up, PRoot when the selected image is a container (only PRoot
+ * can run it), otherwise the best engine this device offers.
+ */
+private fun engineThatWillRun(uiState: MainUiState): EngineKind? = when {
+    uiState.activeEngine != null -> uiState.activeEngine
+    uiState.config?.runsInProotContainer == true -> EngineKind.PROOT
+    else -> uiState.engineCandidates.firstOrNull { it.availability.isAvailable }?.kind
+}
+
 private const val CPU_HEAVY_PERCENT = 85
 
 @Composable
 private fun EnvironmentGroup(uiState: MainUiState, onOpenDiagnostics: () -> Unit) {
-    val bestEngine = uiState.engineCandidates.firstOrNull { it.availability.isAvailable }
+    val engine = engineThatWillRun(uiState)
     GroupCard {
         ListRow(
             title = "Virtualization engine",
-            subtitle = bestEngine?.kind?.shortDescription ?: "None available",
-            value = bestEngine?.kind?.displayName ?: "—",
-            valueColor = if (bestEngine != null) OneUiPalette.SuccessGreen
+            subtitle = engine?.shortDescription ?: "None available",
+            value = engine?.displayName ?: "—",
+            valueColor = if (engine != null) OneUiPalette.SuccessGreen
             else MaterialTheme.colorScheme.error,
         )
         RowDivider()

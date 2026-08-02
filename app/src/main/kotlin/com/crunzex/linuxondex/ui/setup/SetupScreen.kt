@@ -59,6 +59,7 @@ import com.crunzex.linuxondex.vm.NetworkConfig
 import com.crunzex.linuxondex.vm.PortForwardRule
 import com.crunzex.linuxondex.vm.PortProtocol
 import com.crunzex.linuxondex.vm.PreparedImage
+import com.crunzex.linuxondex.vm.PreparedImageFormat
 import com.crunzex.linuxondex.vm.NetworkMode
 import com.crunzex.linuxondex.vm.ScreenResolution
 import com.crunzex.linuxondex.vm.StorageConfig
@@ -266,6 +267,7 @@ fun SetupScreen(
             BackupGroup(
                 backups = uiState.backups,
                 isBackingUp = uiState.isBackingUp,
+                imageFormat = config.preparedImage?.format,
                 enabled = editable,
                 onBackupVm = onBackupVm,
                 onDownloadBackup = onDownloadBackup,
@@ -386,6 +388,8 @@ private fun UsbPassthroughGroup(
 private fun BackupGroup(
     backups: List<VmBackup>,
     isBackingUp: Boolean,
+    /** What the VM boots, so the row can name the file it will produce. */
+    imageFormat: PreparedImageFormat?,
     enabled: Boolean,
     onBackupVm: () -> Unit,
     onDownloadBackup: (VmBackup) -> Unit,
@@ -396,9 +400,11 @@ private fun BackupGroup(
         ListRow(
             title = if (isBackingUp) "Backing up…" else "Back up this VM now",
             subtitle = if (isBackingUp) {
-                "Writing a compacted copy; this can take a while"
+                describeBackupInProgress(imageFormat)
             } else {
-                "Saves a .qcow2 named with today's date and time"
+                // Naming the actual suffix matters: a backup keeps the form of
+                // what it copied, and the user looks for that file by name.
+                "Saves a ${backupSuffixLabel(imageFormat)} named with today's date and time"
             },
             enabled = enabled && !isBackingUp,
             leading = { Icon(Icons.Filled.Add, null, tint = MaterialTheme.colorScheme.primary) },
@@ -542,8 +548,7 @@ private fun PreparedImageGroup(
         uiState.preparedImages.forEach { image ->
             SelectableDeletableRow(
                 title = image.displayName,
-                subtitle = "${image.sizeMb} MB · " +
-                    if (image.seedFile != null) "includes first-boot setup" else "no setup file",
+                subtitle = "${image.sizeMb} MB · " + describePreparedImage(image),
                 selected = image.diskFile.absolutePath == selectedPath,
                 enabled = canEdit,
                 onSelect = { onUsePreparedImage(image) },
@@ -566,7 +571,7 @@ private fun PreparedImageGroup(
             subtitle = if (isImporting) {
                 describeImportProgress(uiState.vmImageImportProgress)
             } else {
-                "Pick a .qcow2 from your files — the dex account is set up for you"
+                "Pick a .qcow2 disk or a .rootfs.tar.gz desktop container"
             },
             enabled = canEdit,
             leading = { Icon(Icons.Filled.Add, null, tint = MaterialTheme.colorScheme.primary) },
@@ -627,6 +632,35 @@ private fun DeleteConfirmDialog(itemName: String, onConfirm: () -> Unit, onDismi
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
+}
+
+/** The file extension a backup of this kind of image will carry. */
+private fun backupSuffixLabel(imageFormat: PreparedImageFormat?): String =
+    when (imageFormat) {
+        PreparedImageFormat.PROOT_ROOTFS -> ".rootfs.tar.gz"
+        else -> ".qcow2"
+    }
+
+/**
+ * A disk image is rewritten and usually comes out smaller; a container
+ * archive is copied as it is, so promising compaction would be wrong.
+ */
+private fun describeBackupInProgress(imageFormat: PreparedImageFormat?): String =
+    when (imageFormat) {
+        PreparedImageFormat.PROOT_ROOTFS -> "Copying the container archive; this can take a while"
+        else -> "Writing a compacted copy; this can take a while"
+    }
+
+/** The second line of an image row: what this file is, at a glance. */
+private fun describePreparedImage(image: PreparedImage): String = when (image.format) {
+    // Deliberately not "desktop": the same format carries console-only
+    // containers, and which one this is cannot be known until it is
+    // unpacked. Claiming a desktop that never appears is worse than saying
+    // less.
+    PreparedImageFormat.PROOT_ROOTFS ->
+        "Linux container — runs at native speed, no emulation"
+    PreparedImageFormat.QCOW2_DISK ->
+        if (image.seedFile != null) "includes first-boot setup" else "no setup file"
 }
 
 private fun describeImportProgress(progress: Float?): String = when {
@@ -995,19 +1029,38 @@ private fun EngineGroup(
     onToggleChoices: () -> Unit,
     onUpdateConfig: (VmConfig) -> Unit,
 ) {
+    // A rootfs image can only run under PRoot, so the image, not the
+    // override, decides — and the row says so instead of pretending the
+    // choice below still applies.
+    val imagePinsEngine = config.runsInProotContainer
     GroupCard {
         ExpanderRow(
             title = "Engine selection",
-            value = config.engineOverride.displayName,
+            value = if (imagePinsEngine) {
+                "PRoot container — set by the selected desktop image"
+            } else {
+                config.engineOverride.displayName
+            },
             expanded = showChoices,
             enabled = enabled,
             onToggle = onToggleChoices,
         )
         AnimatedExpand(expanded = showChoices) {
+            if (imagePinsEngine) {
+                RowDivider()
+                ListRow(
+                    title = "This image runs on PRoot",
+                    subtitle = "Desktop container images always use the native-speed " +
+                        "container. The choice below applies when a disk image or " +
+                        "ISO is selected instead.",
+                    enabled = enabled,
+                )
+            }
             EngineOverride.entries.forEach { option ->
                 RowDivider()
                 ChoiceRow(
                     title = option.displayName,
+                    subtitle = option.description,
                     selected = config.engineOverride == option,
                     enabled = enabled,
                     onSelect = { onUpdateConfig(config.copy(engineOverride = option)) },

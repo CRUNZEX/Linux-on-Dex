@@ -16,6 +16,8 @@ object RfbProtocol {
     const val SERVER_SET_COLOURMAP = 1
     const val SERVER_BELL = 2
     const val SERVER_CUT_TEXT = 3
+    const val SERVER_END_CONTINUOUS_UPDATES = 150
+    const val SERVER_FENCE = 248
 
     // Client → server message types.
     const val CLIENT_SET_PIXEL_FORMAT = 0
@@ -30,6 +32,74 @@ object RfbProtocol {
     const val ENCODING_DESKTOP_SIZE = -223
 
     /**
+     * QEMU's alpha cursor extension. Unlike RichCursor, its pixel payload is
+     * always 32-bit ARGB and therefore does not depend on the framebuffer's
+     * negotiated RGB565 format.
+     */
+    const val ENCODING_ALPHA_CURSOR = -314
+
+    /**
+     * Cursor pseudo-encoding: asks the server to send the mouse pointer as a
+     * separate sprite instead of drawing it into the framebuffer.
+     *
+     * This is what stops a pointer from appearing on screen at all. Without
+     * it, the X server paints its arrow into the pixels it sends, so the
+     * touch position and the drawn arrow are two different things and the
+     * desktop feels like it is being operated at a distance. Requesting the
+     * sprite and then throwing it away leaves the framebuffer clean, and
+     * every tap simply acts where the finger is.
+     *
+     * It also cuts work: a moving pointer no longer dirties the rectangles it
+     * passes over, so an otherwise idle desktop stops sending frames.
+     */
+    const val ENCODING_CURSOR = -239
+
+    /** One signed encoding word followed by one 32-bit pixel per cursor pixel. */
+    fun alphaCursorRectangleByteCount(width: Int, height: Int): Int =
+        checkedRectangleByteCount(
+            width = width,
+            height = height,
+            bytesPerPixel = ALPHA_CURSOR_BYTES_PER_PIXEL,
+            fixedHeaderBytes = Int.SIZE_BYTES,
+        )
+
+    /**
+     * Bytes of pointer-sprite payload for a cursor rectangle: the image
+     * itself plus a 1-bit-per-pixel transparency mask, whose rows are padded
+     * to whole bytes.
+     *
+     * Read and discarded rather than skipped blindly, because the length is
+     * not in the message — miscounting it by one byte desynchronises the
+     * whole stream.
+     */
+    fun cursorRectangleByteCount(width: Int, height: Int): Int {
+        require(width in 0..MAX_RFB_DIMENSION && height in 0..MAX_RFB_DIMENSION) {
+            "cursor dimensions exceed the RFB unsigned-16-bit limit: ${width}x$height"
+        }
+        val imageBytes = width.toLong() * height * BYTES_PER_PIXEL
+        val maskBytes = ((width.toLong() + 7) / 8) * height
+        return checkedByteCount(imageBytes + maskBytes)
+    }
+
+    private fun checkedRectangleByteCount(
+        width: Int,
+        height: Int,
+        bytesPerPixel: Int,
+        fixedHeaderBytes: Int,
+    ): Int {
+        require(width in 0..MAX_RFB_DIMENSION && height in 0..MAX_RFB_DIMENSION) {
+            "rectangle dimensions exceed the RFB unsigned-16-bit limit: ${width}x$height"
+        }
+        val byteCount = width.toLong() * height * bytesPerPixel + fixedHeaderBytes
+        return checkedByteCount(byteCount)
+    }
+
+    private fun checkedByteCount(byteCount: Long): Int {
+        require(byteCount <= Int.MAX_VALUE) { "rectangle payload is too large: $byteCount bytes" }
+        return byteCount.toInt()
+    }
+
+    /**
      * Wire size of one received pixel, and the single source of truth for
      * every buffer that holds pixel data.
      *
@@ -38,6 +108,9 @@ object RfbProtocol {
      * means buffer overruns or garbled frames.
      */
     const val BYTES_PER_PIXEL = 2
+
+    private const val ALPHA_CURSOR_BYTES_PER_PIXEL = 4
+    private const val MAX_RFB_DIMENSION = 65_535
 
     /**
      * The exact 16-byte PIXEL_FORMAT block we request: 16bpp RGB565, true

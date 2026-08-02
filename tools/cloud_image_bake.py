@@ -52,6 +52,12 @@ class BakeBootRequest:
     success_marker: str
     memory_mb: int = 2048
     timeout_seconds: int = 1800
+    """Raw scratch disks attached after the seed (guest: /dev/vdc, /dev/vdd…).
+
+    Used by builds whose product is not the boot disk itself — the PRoot
+    rootfs bake streams a tar archive onto one of these.
+    """
+    extra_raw_disks: tuple[Path, ...] = ()
 
 
 def prepare_staging_disk(
@@ -113,7 +119,18 @@ def compact_into(staging_disk: Path, output_disk: Path) -> None:
     output_disk.parent.mkdir(parents=True, exist_ok=True)
     output_disk.unlink(missing_ok=True)
     _run_checked(
-        [qemu_img, "convert", "-O", "qcow2", str(staging_disk), str(output_disk)],
+        [
+            qemu_img,
+            "convert",
+            "-p",
+            "-c",
+            "-O",
+            "qcow2",
+            "-o",
+            "compat=1.1,compression_type=zlib",
+            str(staging_disk),
+            str(output_disk),
+        ],
         failure_message="compacting the finished image",
     )
 
@@ -161,7 +178,7 @@ def _build_qemu_command(
     accelerator: str,
     request: BakeBootRequest,
 ) -> list[str]:
-    return [
+    command = [
         qemu_system,
         "-machine", "virt",
         "-accel", accelerator,
@@ -176,12 +193,20 @@ def _build_qemu_command(
         "-device", "virtio-blk-pci,drive=root,bootindex=0",
         "-drive", f"if=none,id=seed,format=raw,readonly=on,file={request.seed_iso}",
         "-device", "virtio-blk-pci,drive=seed",
+    ]
+    for index, extra_disk in enumerate(request.extra_raw_disks):
+        command += [
+            "-drive", f"if=none,id=extra{index},format=raw,file={extra_disk}",
+            "-device", f"virtio-blk-pci,drive=extra{index}",
+        ]
+    command += [
         "-netdev", "user,id=net0",
         "-device", "virtio-net-pci,netdev=net0",
         "-device", "virtio-rng-pci",
         "-display", "none",
         "-serial", f"file:{console_log}",
     ]
+    return command
 
 
 def _wait_for_poweroff(

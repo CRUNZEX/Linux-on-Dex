@@ -19,12 +19,13 @@ import com.crunzex.linuxondex.core.LxdError
 import com.crunzex.linuxondex.engine.EngineKind
 import com.crunzex.linuxondex.engine.SerialConsoleConnection
 import com.crunzex.linuxondex.engine.VirtualizationEngine
-import com.crunzex.linuxondex.engine.runtime.JavaLaunchedProcess
-import com.crunzex.linuxondex.engine.runtime.LaunchedProcess
 import com.crunzex.linuxondex.engine.runtime.NativeCommand
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.usb.OpenUsbDevice
+import com.crunzex.linuxondex.usb.UsbGuestChannel
+import com.crunzex.linuxondex.usb.UsbGuestHandle
+import com.crunzex.linuxondex.usb.UsbPassthroughManager
 import com.crunzex.linuxondex.vm.DiskImageManager
 import com.crunzex.linuxondex.vm.PortForwardRule
 import com.crunzex.linuxondex.vm.StopReason
@@ -48,6 +49,7 @@ class QemuVmEngine(
     private val payloadInstaller: PayloadInstaller,
     private val diskManager: DiskImageManager,
     private val accelerator: QemuAccelerator,
+    private val usbPassthroughManager: UsbPassthroughManager? = null,
 ) : VirtualizationEngine {
 
     override val kind: EngineKind =
@@ -60,16 +62,9 @@ class QemuVmEngine(
     private val lifecycleMutex = Mutex()
     private val shutdownInitiated = AtomicBoolean(false)
 
-    private var vmProcess: LaunchedProcess? = null
+    private var vmProcess: Process? = null
     private var exitWatcher: Job? = null
     private var activeConfig: VmConfig? = null
-
-    /**
-     * Opens the USB devices this VM should be given and yields them, still
-     * held open. Set by the controller; the default passes nothing so the
-     * engine works headless and in tests.
-     */
-    var usbDeviceProvider: (VmConfig) -> List<OpenUsbDevice> = { emptyList() }
 
     private fun qmpSocketFile(vmId: String) = paths.socketsDir.resolve("$vmId-qmp.sock")
     private fun serialSocketFile(vmId: String) = paths.socketsDir.resolve("$vmId-serial.sock")
@@ -124,13 +119,13 @@ class QemuVmEngine(
             environment = paths.processEnvironment(),
             workingDirectory = paths.vmRootDir,
         )
-        val process = JavaLaunchedProcess(command.start(redirectErrorStream = true))
+        val process = command.start(redirectErrorStream = true)
         vmProcess = process
         pumpProcessOutput(process, processLogFile(config.id))
         watchProcessExit(process, config)
 
         waitForControlChannel(process, config)
-        attachUsbDevices(config)
+        startUsbPassthrough(config)
         _state.value = VmState.Running(
             engine = kind,
             vncPort = config.vncPort,
@@ -139,42 +134,45 @@ class QemuVmEngine(
         AppLog.info(SCOPE, "VM '${config.id}' running via $kind on VNC port ${config.vncPort}")
     }
 
-    /**
-     * Plugs the configured USB devices into the guest now that it is up.
-     *
-     * They are attached after boot rather than named on the command line
-     * for two reasons. Android only ever gives an app an already-open
-     * descriptor, and the only way to move one into another process is to
-     * send it over a socket — which needs QEMU to already be listening. And
-     * a device that cannot be claimed then fails on its own instead of
-     * taking the whole boot with it, which is exactly what a command-line
-     * `usb-host` did.
-     *
-     * Every failure is contained per device: the VM runs regardless.
-     */
-    private fun attachUsbDevices(config: VmConfig) {
-        val devices = usbDeviceProvider(config)
-        if (devices.isEmpty()) return
-        try {
-            QmpClient.connect(qmpSocketFile(config.id)).use { qmp ->
-                devices.forEach { device -> attachOneUsbDevice(qmp, device) }
-            }
-        } catch (failure: Exception) {
-            AppLog.warn(SCOPE, "could not reach QMP to attach USB devices", failure)
+    /** Arms VM-scoped attach/detach monitoring after QMP becomes reachable. */
+    private fun startUsbPassthrough(config: VmConfig) {
+        val manager = usbPassthroughManager ?: return
+        runCatching {
+            manager.startSession(
+                specs = config.usb.passthroughDevices,
+                channel = QmpUsbGuestChannel(config.id),
+            )
+        }.onFailure { error ->
+            manager.stopSession()
+            AppLog.warn(
+                SCOPE,
+                "USB passthrough could not start; the VM remains available without USB",
+                error,
+            )
         }
     }
 
-    private fun attachOneUsbDevice(qmp: QmpClient, device: OpenUsbDevice) {
-        try {
-            val fdSetId = qmp.addFileDescriptorToNewSet(device.descriptor.fileDescriptor)
-            qmp.attachUsbHostDevice(device.qemuDeviceId, fdSetId)
-            AppLog.info(SCOPE, "attached USB ${device.spec.idKey} to the guest")
-        } catch (refused: Exception) {
-            AppLog.warn(
-                SCOPE,
-                "the guest refused USB ${device.spec.idKey}; it keeps running without it",
-                refused,
-            )
+    /** One short QMP connection per hot-plug operation; fdsets live in QEMU. */
+    private inner class QmpUsbGuestChannel(private val vmId: String) : UsbGuestChannel {
+        override fun attach(device: OpenUsbDevice): UsbGuestHandle {
+            return QmpClient.connect(qmpSocketFile(vmId)).use { qmp ->
+                val fdSetId = qmp.addFileDescriptorToNewSet(device.descriptor.fileDescriptor)
+                try {
+                    qmp.attachUsbHostDevice(device.qemuDeviceId, fdSetId)
+                    UsbGuestHandle(device.qemuDeviceId, fdSetId)
+                } catch (error: Exception) {
+                    runCatching { qmp.removeFileDescriptorSet(fdSetId) }
+                    throw error
+                }
+            }
+        }
+
+        override fun detach(handle: UsbGuestHandle) {
+            QmpClient.connect(qmpSocketFile(vmId)).use { qmp ->
+                runCatching { qmp.detachDevice(handle.qemuDeviceId) }
+                    .onFailure { AppLog.warn(SCOPE, "QMP device_del failed", it) }
+                qmp.removeFileDescriptorSet(handle.fileDescriptorSetId)
+            }
         }
     }
 
@@ -234,7 +232,7 @@ class QemuVmEngine(
     }
 
     /** QEMU can take a while to create the QMP socket; poll until it accepts. */
-    private fun waitForControlChannel(process: LaunchedProcess, config: VmConfig) {
+    private fun waitForControlChannel(process: Process, config: VmConfig) {
         val socketFile = qmpSocketFile(config.id)
         val deadline = System.currentTimeMillis() + CONTROL_CHANNEL_TIMEOUT_MS
         var lastFailure: Exception? = null
@@ -416,11 +414,11 @@ class QemuVmEngine(
         false
     }
 
-    private fun pumpProcessOutput(process: LaunchedProcess, logFile: File) {
+    private fun pumpProcessOutput(process: Process, logFile: File) {
         engineScope.launch {
             try {
                 logFile.outputStream().bufferedWriter().use { sink ->
-                    process.output.bufferedReader().forEachLine { line ->
+                    process.inputStream.bufferedReader().forEachLine { line ->
                         sink.appendLine(line)
                         sink.flush()
                         if (deservesAttention(line)) {
@@ -439,7 +437,7 @@ class QemuVmEngine(
         }
     }
 
-    private fun watchProcessExit(process: LaunchedProcess, config: VmConfig) {
+    private fun watchProcessExit(process: Process, config: VmConfig) {
         exitWatcher = engineScope.launch {
             val exitCode = runCatching { process.waitFor() }.getOrDefault(-1)
             if (shutdownInitiated.get()) return@launch // stop()/forceStop() owns the state
@@ -454,14 +452,17 @@ class QemuVmEngine(
                 )
                 // During Starting, waitForControlChannel reports the failure.
             }
+            cleanupProcess()
         }
     }
 
     private fun cleanupProcess() {
+        usbPassthroughManager?.stopSession()
         exitWatcher?.cancel()
         exitWatcher = null
         vmProcess = null
         activeConfig?.id?.let(::deleteStaleSockets)
+        activeConfig = null
     }
 
     private fun deleteStaleSockets(vmId: String) {

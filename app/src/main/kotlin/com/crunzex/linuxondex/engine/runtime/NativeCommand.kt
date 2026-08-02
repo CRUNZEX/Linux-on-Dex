@@ -24,7 +24,56 @@ data class NativeCommand(
         if (!program.exists()) {
             throw LxdError.PayloadMissing(program.name)
         }
-        val builder = ProcessBuilder(listOf(program.absolutePath) + arguments)
+        return startProcess(
+            commandLine = listOf(program.absolutePath) + arguments,
+            redirectErrorStream = redirectErrorStream,
+        )
+    }
+
+    /**
+     * Starts the command through Android's system shell and records the host
+     * PID before `exec` replaces that shell with [program]. Android's
+     * java.lang.Process deliberately exposes no PID, but scoped descendant
+     * cleanup needs it to prevent closed PRoot consoles leaking processes.
+     */
+    fun startTracked(
+        processIdFile: File,
+        redirectErrorStream: Boolean = true,
+    ): TrackedNativeProcess {
+        if (!program.exists()) {
+            throw LxdError.PayloadMissing(program.name)
+        }
+        val systemShell = File(ANDROID_SYSTEM_SHELL_PATH)
+        if (!systemShell.exists()) {
+            throw LxdError.PayloadMissing(systemShell.name)
+        }
+        processIdFile.delete()
+        val wrapperArguments = listOf(
+            "-c",
+            TRACKED_PROCESS_WRAPPER,
+            "linux-on-dex-process-wrapper",
+            processIdFile.absolutePath,
+            program.absolutePath,
+        ) + arguments
+        val process = startProcess(
+            commandLine = listOf(systemShell.absolutePath) + wrapperArguments,
+            redirectErrorStream = redirectErrorStream,
+        )
+        val processId = waitForProcessId(process, processIdFile)
+        if (processId == null) {
+            process.destroyForcibly()
+            throw LxdError.ProcessSpawnFailed(
+                "${describe()} did not publish its process ID"
+            )
+        }
+        return TrackedNativeProcess(process, processId)
+    }
+
+    private fun startProcess(
+        commandLine: List<String>,
+        redirectErrorStream: Boolean,
+    ): Process {
+        val builder = ProcessBuilder(commandLine)
             .redirectErrorStream(redirectErrorStream)
         workingDirectory?.let { builder.directory(it) }
         builder.environment().putAll(environment)
@@ -34,6 +83,18 @@ data class NativeCommand(
         } catch (error: Exception) {
             throw LxdError.ProcessSpawnFailed(describe(), error)
         }
+    }
+
+    private fun waitForProcessId(process: Process, processIdFile: File): Int? {
+        val deadline = System.currentTimeMillis() + PROCESS_ID_FILE_TIMEOUT_MILLIS
+        while (process.isAlive && System.currentTimeMillis() < deadline) {
+            val processId = runCatching {
+                processIdFile.readText().trim().toIntOrNull()
+            }.getOrNull()
+            if (processId != null) return processId
+            Thread.sleep(PROCESS_ID_FILE_POLL_MILLIS)
+        }
+        return null
     }
 
     /**
@@ -69,8 +130,20 @@ data class NativeCommand(
         private const val DEFAULT_TIMEOUT_SECONDS = 30L
         private const val MAX_CAPTURED_OUTPUT_CHARS = 64_000
         private const val OUTPUT_JOIN_MILLIS = 2_000L
+        private const val ANDROID_SYSTEM_SHELL_PATH = "/system/bin/sh"
+        private const val PROCESS_ID_FILE_TIMEOUT_MILLIS = 2_000L
+        private const val PROCESS_ID_FILE_POLL_MILLIS = 10L
+
+        /** `$1` is the PID file; the remaining positional arguments are exec'd. */
+        private const val TRACKED_PROCESS_WRAPPER =
+            "umask 077; printf '%s\\n' \"\$\$\" > \"\$1\"; shift; exec \"\$@\""
     }
 }
+
+data class TrackedNativeProcess(
+    val process: Process,
+    val processId: Int,
+)
 
 data class CommandResult(val exitCode: Int, val output: String) {
     val isSuccess: Boolean get() = exitCode == 0

@@ -9,9 +9,9 @@ import java.io.InputStream
 
 /**
  * Minimal ustar/GNU tar reader — just enough for Linux rootfs archives:
- * regular files, directories, symlinks, hardlinks, long names ('L') and the
- * executable bit. Written here instead of pulling in commons-compress to keep
- * the dependency surface reviewable.
+ * regular files, directories, symlinks, hardlinks, GNU long names ('L'/'K')
+ * and the full permission bits. Written here instead of pulling in
+ * commons-compress to keep the dependency surface reviewable.
  */
 object TarExtractor {
 
@@ -22,30 +22,47 @@ object TarExtractor {
         destinationDir.mkdirs()
         val destinationRoot = destinationDir.canonicalFile
         var pendingLongName: String? = null
+        var pendingLongLinkTarget: String? = null
         var entryCount = 0
 
         while (true) {
             val header = readBlock(archive) ?: break
             if (header.all { it == 0.toByte() }) break // end-of-archive marker
 
-            val entryName = pendingLongName ?: parseName(header)
-            pendingLongName = null
             val entrySize = parseOctal(header, offset = 124, length = 12)
             val typeFlag = header[156].toInt().toChar()
+
+            // Metadata records describe the NEXT real entry. They are
+            // collected first so their order ('K' before 'L' or the other
+            // way round) never matters.
+            when (typeFlag) {
+                'L' -> { pendingLongName = readContentAsString(archive, entrySize); continue }
+                'K' -> { pendingLongLinkTarget = readContentAsString(archive, entrySize); continue }
+                // pax records: safe to skip, because the archives this app
+                // consumes are produced with --format=gnu, where names never
+                // rely on pax attributes.
+                'x', 'g' -> { skipContent(archive, entrySize); continue }
+            }
+
+            val entryName = pendingLongName ?: parseName(header)
+            val linkTarget = pendingLongLinkTarget
+                ?: parseString(header, offset = 157, length = 100)
+            pendingLongName = null
+            pendingLongLinkTarget = null
             val mode = parseOctal(header, offset = 100, length = 8).toInt()
-            val linkTarget = parseString(header, offset = 157, length = 100)
 
             when (typeFlag) {
-                'L' -> pendingLongName = readContentAsString(archive, entrySize)
                 '0', Char(0) -> {
                     val file = resolveSafely(destinationRoot, entryName)
                     file.parentFile?.mkdirs()
                     writeContent(archive, entrySize, file)
-                    applyExecutableBit(file, mode)
+                    applyFileMode(file, mode)
                     entryCount++
                 }
                 '5' -> {
-                    resolveSafely(destinationRoot, entryName).mkdirs()
+                    val directory = resolveSafely(destinationRoot, entryName)
+                    directory.mkdirs()
+                    applyFileMode(directory, mode)
                     entryCount++
                 }
                 '2' -> {
@@ -61,7 +78,13 @@ object TarExtractor {
                     val source = resolveSafely(destinationRoot, linkTarget)
                     val target = resolveSafely(destinationRoot, entryName)
                     target.parentFile?.mkdirs()
-                    if (source.exists()) source.copyTo(target, overwrite = true)
+                    // Copied, not linked: Android storage rejects hardlinks
+                    // in places, and PRoot does not care about inode sharing.
+                    if (source.exists()) {
+                        source.copyTo(target, overwrite = true)
+                    } else {
+                        AppLog.debug(SCOPE, "hardlink source missing: $linkTarget")
+                    }
                     skipContent(archive, entrySize)
                     entryCount++
                 }
@@ -114,7 +137,7 @@ object TarExtractor {
     private fun writeContent(input: InputStream, size: Long, destination: File) {
         destination.outputStream().use { output ->
             var remaining = size
-            val buffer = ByteArray(BLOCK_SIZE * 32)
+            val buffer = ByteArray(CONTENT_BUFFER_BYTES)
             while (remaining > 0) {
                 val toRead = minOf(buffer.size.toLong(), remaining).toInt()
                 val read = input.read(buffer, 0, toRead)
@@ -162,8 +185,23 @@ object TarExtractor {
         }
     }
 
-    private fun applyExecutableBit(file: File, mode: Int) {
-        val ownerExecutable = (mode and 0b001_000_000) != 0
-        if (ownerExecutable) file.setExecutable(true, false)
+    /**
+     * Applies the archive's permission bits. sudo and sshd check config-file
+     * modes and refuse to run on a rootfs where everything came out 0644,
+     * so faithful modes matter beyond the executable bit.
+     */
+    private fun applyFileMode(file: File, mode: Int) {
+        val permissionBits = mode and PERMISSION_BITS_MASK
+        if (permissionBits == 0) return
+        try {
+            Os.chmod(file.absolutePath, permissionBits)
+        } catch (_: Exception) {
+            // Filesystem without chmod support: keep at least execution.
+            if ((mode and OWNER_EXECUTE_BIT) != 0) file.setExecutable(true, false)
+        }
     }
+
+    private const val PERMISSION_BITS_MASK = 0b111_111_111_111 // 07777
+    private const val OWNER_EXECUTE_BIT = 0b001_000_000
+    private const val CONTENT_BUFFER_BYTES = 1 shl 18
 }

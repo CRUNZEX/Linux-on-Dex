@@ -19,10 +19,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.crunzex.linuxondex.capability.GuestGraphicsSupport
 import com.crunzex.linuxondex.capability.KvmAccess
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.engine.EngineAvailability
@@ -124,13 +126,13 @@ private fun CapabilitiesGroup(uiState: MainUiState) {
  * Where the phone's GPU is and is not in play — stated plainly so "make it
  * use the GPU" has a truthful answer. App-side drawing (VNC surface,
  * terminal glyphs) runs on the device GPU through hardware-accelerated
- * canvases. The *guest's* 3D cannot: stock Samsung firmware gives untrusted
- * apps no KVM and no GPU render nodes, so the guest renders GL in software
- * (llvmpipe) and this app tunes the desktop images accordingly.
+ * canvases. PRoot 3D uses a separately verified virgl bridge into Android
+ * EGL/Vulkan; a failed vendor backend is contained and falls back to llvmpipe.
  */
 @Composable
 private fun DisplayPathGroup() {
     val view = androidx.compose.ui.platform.LocalView.current
+    val context = androidx.compose.ui.platform.LocalContext.current
     val hardwareCanvas = view.isHardwareAccelerated
     GroupCard {
         ListRow(
@@ -141,16 +143,21 @@ private fun DisplayPathGroup() {
             else MaterialTheme.colorScheme.error,
         )
         RowDivider()
+        val nativeVirglAvailable = remember(context) {
+            java.io.File(
+                context.applicationInfo.nativeLibraryDir,
+                "libvirgl-test-server-android.so",
+            ).exists()
+        }
+        val guestGraphics = remember(nativeVirglAvailable) {
+            GuestGraphicsSupport.measure(nativeVirglAvailable)
+        }
         ListRow(
             title = "Guest 3D acceleration",
-            // Measured, not assumed: the packaged QEMU offers only
-            // virtio-gpu-pci (no virtio-gpu-gl-pci) and no egl-headless
-            // display, so there is no path from guest GL to the phone GPU.
-            // Enabling it needs a QEMU rebuilt against virglrenderer, not a
-            // setting — see the notes in the repository README.
-            subtitle = "The packaged VM runtime has no 3D device, so guest " +
-                "graphics are drawn by the CPU. Lower the resolution for speed.",
-            value = "Software (llvmpipe)",
+            subtitle = GuestGraphicsSupport.explain(guestGraphics),
+            value = guestGraphics.renderer.displayName,
+            valueColor = if (guestGraphics.isHardware) OneUiPalette.SuccessGreen
+            else MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
