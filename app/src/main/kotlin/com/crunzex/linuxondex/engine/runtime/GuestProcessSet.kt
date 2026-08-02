@@ -21,7 +21,39 @@ object GuestProcessSet {
         val executablePath: String?,
         /** /proc/<pid>/cmdline with its NUL separators turned into spaces. */
         val commandLine: String,
+        /** Parent from /proc/<pid>/status, or null when Android hides it. */
+        val parentProcessId: Int? = null,
     )
+
+    /**
+     * Returns every process descended from [rootProcessId], parents before
+     * children. The caller can reverse this order to terminate leaves first.
+     *
+     * A visited set makes corrupted or racing /proc snapshots harmless: a
+     * process is returned once even if an impossible parent cycle appears.
+     */
+    fun descendantProcessIds(
+        snapshots: List<ProcessSnapshot>,
+        rootProcessId: Int,
+    ): List<Int> {
+        val childrenByParent = snapshots
+            .filter { snapshot -> snapshot.parentProcessId != null }
+            .groupBy { snapshot -> requireNotNull(snapshot.parentProcessId) }
+        val pendingParents = ArrayDeque<Int>().apply { add(rootProcessId) }
+        val visited = mutableSetOf(rootProcessId)
+        val descendants = mutableListOf<Int>()
+
+        while (pendingParents.isNotEmpty()) {
+            val parentProcessId = pendingParents.removeFirst()
+            childrenByParent[parentProcessId].orEmpty().forEach { child ->
+                if (visited.add(child.processId)) {
+                    descendants += child.processId
+                    pendingParents += child.processId
+                }
+            }
+        }
+        return descendants
+    }
 
     /**
      * Processes running out of [guestDirectoryPaths] — the app's own guest

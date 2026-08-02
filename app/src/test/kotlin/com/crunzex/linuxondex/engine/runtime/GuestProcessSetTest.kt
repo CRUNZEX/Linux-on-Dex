@@ -22,7 +22,8 @@ class GuestProcessSetTest {
         processId: Int,
         executablePath: String? = null,
         commandLine: String = "",
-    ) = ProcessSnapshot(processId, executablePath, commandLine)
+        parentProcessId: Int? = null,
+    ) = ProcessSnapshot(processId, executablePath, commandLine, parentProcessId)
 
     private fun select(vararg snapshots: ProcessSnapshot): List<Int> =
         GuestProcessSet.runningInsideGuestDirectories(
@@ -149,5 +150,33 @@ class GuestProcessSetTest {
         )
 
         assertTrue(select(sibling).isEmpty())
+    }
+
+    @Test
+    fun `owned process descendants include nested children but not siblings`() {
+        val launcher = process(processId = 7000, parentProcessId = ownProcessId)
+        val script = process(processId = 7001, parentProcessId = launcher.processId)
+        val bash = process(processId = 7002, parentProcessId = script.processId)
+        val unrelatedSibling = process(processId = 7003, parentProcessId = ownProcessId)
+
+        val descendants = GuestProcessSet.descendantProcessIds(
+            snapshots = listOf(launcher, script, bash, unrelatedSibling),
+            rootProcessId = launcher.processId,
+        )
+
+        assertEquals(listOf(script.processId, bash.processId), descendants)
+    }
+
+    @Test
+    fun `a corrupt parent cycle cannot return a process twice`() {
+        val first = process(processId = 7101, parentProcessId = 7102)
+        val second = process(processId = 7102, parentProcessId = 7101)
+
+        val descendants = GuestProcessSet.descendantProcessIds(
+            snapshots = listOf(first, second),
+            rootProcessId = first.processId,
+        )
+
+        assertEquals(listOf(second.processId), descendants)
     }
 }

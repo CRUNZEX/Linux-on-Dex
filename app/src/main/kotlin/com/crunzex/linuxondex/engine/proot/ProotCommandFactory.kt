@@ -28,7 +28,11 @@ object ProotCommandFactory {
         program = paths.prootBinary,
         arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
             listOf(DESKTOP_SUPERVISOR_GUEST_PATH),
-        environment = guestEnvironment(paths, graphicsBridgeEnabled) + mapOf(
+        environment = guestEnvironment(
+            paths = paths,
+            graphicsBridgeEnabled = graphicsBridgeEnabled,
+            selectVirglDriver = false,
+        ) + mapOf(
             "DEX_RESOLUTION" to displayResolution,
             "DEX_VNC_PORT" to vncPort.toString(),
         ),
@@ -52,7 +56,11 @@ object ProotCommandFactory {
         program = paths.prootBinary,
         arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
             listOf(CONSOLE_SESSION_GUEST_PATH),
-        environment = guestEnvironment(paths, graphicsBridgeEnabled),
+        environment = guestEnvironment(
+            paths = paths,
+            graphicsBridgeEnabled = graphicsBridgeEnabled,
+            selectVirglDriver = false,
+        ),
         workingDirectory = paths.vmRootDir,
     )
 
@@ -73,7 +81,11 @@ object ProotCommandFactory {
         program = paths.prootBinary,
         arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
             listOf("/usr/bin/script", "-q", "-c", INTERACTIVE_LOGIN_COMMAND, "/dev/null"),
-        environment = guestEnvironment(paths, graphicsBridgeEnabled),
+        environment = guestEnvironment(
+            paths = paths,
+            graphicsBridgeEnabled = graphicsBridgeEnabled,
+            selectVirglDriver = false,
+        ),
         workingDirectory = paths.vmRootDir,
     )
 
@@ -89,7 +101,11 @@ object ProotCommandFactory {
             sharedFolderDir = null,
             graphicsBridgeEnabled = true,
         ) + listOf("/usr/bin/eglinfo", "-B", "-p", "surfaceless"),
-        environment = guestEnvironment(paths, graphicsBridgeEnabled = true),
+        environment = guestEnvironment(
+            paths = paths,
+            graphicsBridgeEnabled = true,
+            selectVirglDriver = true,
+        ),
         workingDirectory = paths.vmRootDir,
     )
 
@@ -167,6 +183,7 @@ object ProotCommandFactory {
     private fun guestEnvironment(
         paths: VmPaths,
         graphicsBridgeEnabled: Boolean = false,
+        selectVirglDriver: Boolean = false,
     ): Map<String, String> {
         val environment = paths.processEnvironment() + mapOf(
             // PROOT_* are read by PRoot itself, so they stay host paths.
@@ -191,8 +208,12 @@ object ProotCommandFactory {
             "LANG" to "C.UTF-8",
         )
         if (!graphicsBridgeEnabled) return environment
-        return environment + mapOf(
+        val bridgeEnvironment = environment + mapOf(
             "DEX_GPU_BRIDGE" to "1",
+            "VTEST_SOCKET_NAME" to VIRGL_SOCKET_GUEST_PATH,
+        )
+        if (!selectVirglDriver) return bridgeEnvironment
+        return bridgeEnvironment + mapOf(
             "GALLIUM_DRIVER" to "virpipe",
             // Mesa categorises virpipe as a software winsys even though the
             // server forwards its rendering to Android's hardware driver.
@@ -202,7 +223,6 @@ object ProotCommandFactory {
             // virgl can report a capability set.
             "MESA_GL_VERSION_OVERRIDE" to "3.3",
             "MESA_GLES_VERSION_OVERRIDE" to "3.1",
-            "VTEST_SOCKET_NAME" to VIRGL_SOCKET_GUEST_PATH,
         )
     }
 

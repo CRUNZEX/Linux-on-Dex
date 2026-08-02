@@ -5,7 +5,8 @@ GNOME Shell composites every frame and is too expensive over a phone-local VNC
 display. This image uses XFCE components with a GNOME-like top bar and dock,
 but deliberately omits the compositor, desktop manager, animations, and stock
 session helpers. OpenGL applications still use the app's Android virgl bridge.
-The artifact is a normal ``.rootfs.tar.gz`` consumed by the PRoot engine.
+VS Code and Firefox are preinstalled. The artifact is a normal
+``.rootfs.tar.gz`` consumed by the PRoot engine.
 
 The build runs in an arm64 Docker container, installs only the desktop pieces
 that are used, then exports and validates the filesystem.
@@ -27,12 +28,12 @@ from pathlib import Path
 
 
 UBUNTU_BASE_DIGEST = "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
-RELEASE_VERSION = "1.1.12"
+RELEASE_VERSION = "1.1.13"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = (
     PROJECT_ROOT
-    / "dist/ready-vm/linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz"
+    / "dist/ready-vm/linux-on-dex-ubuntu-24.04-proot-gnome-like-xfce-arm64.rootfs.tar.gz"
 )
 
 REQUIRED_PATHS = (
@@ -40,7 +41,10 @@ REQUIRED_PATHS = (
     "usr/local/bin/dex-xfce-session",
     "usr/local/bin/dex-name-groups",
     "usr/local/bin/code",
+    "usr/local/bin/firefox",
+    "usr/local/bin/dex-gpu",
     "usr/share/code/code",
+    "usr/lib/firefox/firefox",
     "usr/bin/xfce4-panel",
     "usr/bin/xfsettingsd",
     "usr/bin/xfwm4",
@@ -74,6 +78,9 @@ def write_build_context(directory: Path) -> None:
     (directory / "dex-xfce-session").write_text(DESKTOP_SESSION, encoding="utf-8")
     (directory / "dex-name-groups").write_text(GROUP_NAMER_SCRIPT, encoding="utf-8")
     (directory / "code-wrapper").write_text(VSCODE_WRAPPER_SCRIPT, encoding="utf-8")
+    (directory / "firefox-wrapper").write_text(FIREFOX_WRAPPER_SCRIPT, encoding="utf-8")
+    (directory / "firefox-policies.json").write_text(FIREFOX_POLICIES, encoding="utf-8")
+    (directory / "dex-gpu").write_text(GPU_WRAPPER_SCRIPT, encoding="utf-8")
     (directory / "apt-config").write_text(APT_CONFIG, encoding="utf-8")
     (directory / "sshd_config").write_text(SSHD_CONFIG, encoding="utf-8")
     (directory / "xfwm4.xml").write_text(XFWM_CONFIGURATION, encoding="utf-8")
@@ -93,8 +100,22 @@ def render_dockerfile() -> str:
               xfwm4 xfce4-panel xfce4-settings \\
               thunar xfce4-terminal tigervnc-standalone-server x11-xserver-utils \\
               x11-utils xdotool \\
-              openssh-server openssh-client git curl ca-certificates \\
+              openssh-server openssh-client git curl ca-certificates gnupg \\
               mesa-utils fonts-ubuntu fonts-dejavu-core adwaita-icon-theme \\
+            && install -d -m 0755 /etc/apt/keyrings \\
+            && curl -fsSL 'https://packages.mozilla.org/apt/repo-signing-key.gpg' \\
+              -o /etc/apt/keyrings/packages.mozilla.org.asc \\
+            && fingerprint="$(gpg --batch --show-keys --with-colons \\
+              /etc/apt/keyrings/packages.mozilla.org.asc | \\
+              awk -F: '$1 == "fpr" {{ print $10; exit }}')" \\
+            && test "$fingerprint" = '35BAA0B33E9EB396F59CA838C0BA5CE6DC6315A3' \\
+            && printf '%s\\n' \\
+              'deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main' \\
+              > /etc/apt/sources.list.d/mozilla.list \\
+            && printf '%s\\n' 'Package: *' 'Pin: origin packages.mozilla.org' \\
+              'Pin-Priority: 1000' > /etc/apt/preferences.d/mozilla \\
+            && apt-get update \\
+            && apt-get install -y --no-install-recommends firefox \\
             && curl -fsSL -o /tmp/code.deb \\
               'https://update.code.visualstudio.com/latest/linux-deb-arm64/stable' \\
             && apt-get install -y --no-install-recommends /tmp/code.deb \\
@@ -106,6 +127,9 @@ def render_dockerfile() -> str:
         COPY dex-xfce-session /usr/local/bin/dex-xfce-session
         COPY dex-name-groups /usr/local/bin/dex-name-groups
         COPY code-wrapper /opt/linux-on-dex/code-wrapper
+        COPY firefox-wrapper /opt/linux-on-dex/firefox-wrapper
+        COPY firefox-policies.json /opt/linux-on-dex/firefox-policies.json
+        COPY dex-gpu /usr/local/bin/dex-gpu
         COPY apt-config /etc/apt/apt.conf.d/99-linux-on-dex
         COPY sshd_config /etc/ssh/sshd_config.d/10-linux-on-dex.conf
         COPY xfwm4.xml /root/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
@@ -114,10 +138,16 @@ def render_dockerfile() -> str:
 
         RUN chmod 0755 /usr/local/bin/dex-desktop /usr/local/bin/dex-xfce-session \\
               /usr/local/bin/dex-name-groups /opt/linux-on-dex/code-wrapper \\
+              /opt/linux-on-dex/firefox-wrapper /usr/local/bin/dex-gpu \\
             && install -m 0755 /opt/linux-on-dex/code-wrapper /usr/local/bin/code \\
+            && install -m 0755 /opt/linux-on-dex/firefox-wrapper /usr/local/bin/firefox \\
+            && install -D -m 0644 /opt/linux-on-dex/firefox-policies.json \\
+              /usr/lib/firefox/distribution/policies.json \\
             && sed -i 's|Exec=/usr/share/code/code|Exec=/usr/local/bin/code|g' \\
               /usr/share/applications/code.desktop \\
               /usr/share/applications/code-url-handler.desktop \\
+            && sed -i -E 's|^Exec=(/usr/lib/firefox/)?firefox|Exec=/usr/local/bin/firefox|' \\
+              /usr/share/applications/firefox.desktop \\
             && printf '%s\\n' \\
               '[ -x /usr/local/bin/dex-name-groups ] && /usr/local/bin/dex-name-groups 2>/dev/null' \\
               ':' > /etc/profile.d/05-linux-on-dex-groups.sh \\
@@ -225,7 +255,7 @@ def main() -> None:
 
 
 DESKTOP_SUPERVISOR = r"""#!/bin/sh
-set -eu
+set -u
 
 resolution="${DEX_RESOLUTION:-1280x800}"
 vnc_port="${DEX_VNC_PORT:-5901}"
@@ -237,14 +267,11 @@ export HOME=/root USER=root LOGNAME=root SHELL=/bin/bash LANG=C.UTF-8
 /usr/local/bin/dex-name-groups 2>/dev/null || true
 export DISPLAY=:1 XDG_RUNTIME_DIR=/run/user/0
 export XDG_SESSION_TYPE=x11 XDG_CURRENT_DESKTOP=XFCE
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
 if [ "${DEX_GPU_BRIDGE:-0}" = 1 ]; then
-    export LIBGL_ALWAYS_SOFTWARE=1
-    export GALLIUM_DRIVER=virpipe
-    export MESA_GL_VERSION_OVERRIDE=3.3
-    export MESA_GLES_VERSION_OVERRIDE=3.1
-    log 'native Android virgl bridge enabled'
+    log 'stable llvmpipe desktop; native virgl available through dex-gpu'
 else
-    export LIBGL_ALWAYS_SOFTWARE=1
     log 'native GPU bridge unavailable; using llvmpipe'
 fi
 export GSK_RENDERER=cairo
@@ -275,11 +302,53 @@ while [ ! -S /tmp/.X11-unix/X1 ]; do
     sleep 0.1
 done
 
-# Start only the settings daemon, window manager, and panel. The stock XFCE
-# session also starts xfdesktop and helpers that add redraws and failing
-# service probes under Android PRoot.
-log 'starting GNOME-like XFCE session (compositor and animations disabled)'
-exec dbus-run-session -- /usr/local/bin/dex-xfce-session
+session_pid=''
+
+stop_children() {
+    if [ -n "$session_pid" ]; then
+        kill "$session_pid" 2>/dev/null || true
+        wait "$session_pid" 2>/dev/null || true
+        session_pid=''
+    fi
+    kill "$xvnc_pid" 2>/dev/null || true
+    wait "$xvnc_pid" 2>/dev/null || true
+}
+
+handle_shutdown() {
+    log 'shutdown requested; stopping desktop and Xvnc'
+    stop_children
+    exit 0
+}
+
+trap handle_shutdown HUP INT TERM
+
+# Xvnc remains the session leader. A panel or window-manager failure restarts
+# only the lightweight desktop while VNC, SSH, and terminal connections stay
+# alive.
+restart_attempt=0
+while kill -0 "$xvnc_pid" 2>/dev/null; do
+    started_at=$(date +%s)
+    log 'starting GNOME-like XFCE session (compositor and animations disabled)'
+    dbus-run-session -- /usr/local/bin/dex-xfce-session &
+    session_pid=$!
+    wait "$session_pid"
+    session_exit_code=$?
+    session_pid=''
+
+    if ! kill -0 "$xvnc_pid" 2>/dev/null; then
+        log 'Xvnc exited while the desktop was running'
+        exit 1
+    fi
+    runtime=$(( $(date +%s) - started_at ))
+    if [ "$runtime" -ge 60 ]; then restart_attempt=1; else restart_attempt=$((restart_attempt + 1)); fi
+    restart_delay=$restart_attempt
+    if [ "$restart_delay" -gt 3 ]; then restart_delay=3; fi
+    log "desktop exited with code $session_exit_code; restarting in ${restart_delay}s"
+    sleep "$restart_delay"
+done
+
+log 'Xvnc stopped unexpectedly'
+exit 1
 """
 
 
@@ -370,9 +439,56 @@ exec /usr/share/code/code \
     --disable-gpu \
     --disable-dev-shm-usage \
     --disable-crash-reporter \
+    --renderer-process-limit=2 \
     --disable-features=CalculateNativeWinOcclusion,UseChromeOSDirectVideoDecoder \
     --password-store=basic \
     "$@"
+"""
+
+
+FIREFOX_WRAPPER_SCRIPT = r"""#!/bin/sh
+export MOZ_DISABLE_CONTENT_SANDBOX=1
+export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_GPU_SANDBOX=1
+export MOZ_ENABLE_WAYLAND=0
+export MOZ_WEBRENDER=0
+export MOZ_X11_EGL=0
+exec /usr/lib/firefox/firefox --no-remote "$@"
+"""
+
+
+FIREFOX_POLICIES = r"""{
+  "policies": {
+    "Preferences": {
+      "browser.tabs.remote.autostart": false,
+      "dom.ipc.processCount": 1,
+      "dom.ipc.processCount.webIsolated": 1,
+      "dom.ipc.processCount.webLargeAllocation": 1,
+      "fission.autostart": false
+    }
+  }
+}
+"""
+
+
+GPU_WRAPPER_SCRIPT = r"""#!/bin/sh
+set -eu
+
+if [ "${DEX_GPU_BRIDGE:-0}" != 1 ] || [ ! -S "${VTEST_SOCKET_NAME:-/tmp/.virgl_test}" ]; then
+    echo 'dex-gpu: the native Android virgl bridge is unavailable' >&2
+    exit 69
+fi
+if [ "$#" -eq 0 ]; then
+    echo 'usage: dex-gpu <command> [arguments...]' >&2
+    exit 64
+fi
+
+export GALLIUM_DRIVER=virpipe
+export LIBGL_ALWAYS_SOFTWARE=1
+export MESA_GL_VERSION_OVERRIDE=3.3
+export MESA_GLES_VERSION_OVERRIDE=3.1
+exec "$@"
 """
 
 

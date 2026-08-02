@@ -121,7 +121,7 @@ class ProotCommandFactoryTest {
     }
 
     @Test
-    fun `native graphics bridge binds only its socket and selects virpipe`() {
+    fun `desktop sees native bridge without forcing the compositor onto virpipe`() {
         val command = ProotCommandFactory.desktopSession(
             paths = paths,
             rootfsDir = rootfsDir,
@@ -138,11 +138,21 @@ class ProotCommandFactoryTest {
             },
         )
         assertEquals("1", command.environment["DEX_GPU_BRIDGE"])
-        assertEquals("virpipe", command.environment["GALLIUM_DRIVER"])
+        assertNull(command.environment["GALLIUM_DRIVER"])
         assertEquals(
             ProotCommandFactory.VIRGL_SOCKET_GUEST_PATH,
             command.environment["VTEST_SOCKET_NAME"],
         )
+    }
+
+    @Test
+    fun `graphics probe explicitly selects virpipe`() {
+        val command = ProotCommandFactory.graphicsProbe(paths, rootfsDir)
+
+        assertEquals("1", command.environment["DEX_GPU_BRIDGE"])
+        assertEquals("virpipe", command.environment["GALLIUM_DRIVER"])
+        assertEquals("1", command.environment["LIBGL_ALWAYS_SOFTWARE"])
+        assertEquals("3.3", command.environment["MESA_GL_VERSION_OVERRIDE"])
     }
 
     @Test

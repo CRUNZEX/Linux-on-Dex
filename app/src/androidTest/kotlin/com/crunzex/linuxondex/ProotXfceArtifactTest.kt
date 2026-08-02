@@ -31,7 +31,7 @@ import kotlin.time.Duration.Companion.seconds
  *
  * Push the artifact before running:
  * ```
- * adb push dist/ready-vm/linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz \
+ * adb push dist/v1.1.13/linux-on-dex-ubuntu-24.04-proot-gnome-like-xfce-arm64.rootfs.tar.gz \
  *   /sdcard/Android/data/com.crunzex.linuxondex/files/vm-images/
  * ```
  */
@@ -86,7 +86,7 @@ class ProotXfceArtifactTest {
                 ?: throw AssertionError("no shell from running XFCE rootfs")
             console.use {
                 val validationCommand =
-                    "eglinfo -B -p surfaceless 2>&1; " +
+                    "dex-gpu eglinfo -B -p surfaceless 2>&1; " +
                         "printf 'EGL_STATUS=%s\\n' \"$?\"; " +
                         "if pgrep -x xfsettingsd >/dev/null && " +
                         "pgrep -x xfwm4 >/dev/null && " +
@@ -103,6 +103,14 @@ class ProotXfceArtifactTest {
                         "if command -v code >/dev/null && test -x /usr/share/code/code; " +
                         "then printf 'CODE_' && printf 'STATUS=INSTALLED\\n'; " +
                         "else printf 'CODE_' && printf 'STATUS=MISSING\\n'; fi; " +
+                        "if command -v firefox >/dev/null && test -x /usr/lib/firefox/firefox; " +
+                        "then printf 'FIREFOX_' && printf 'STATUS=INSTALLED\\n'; " +
+                        "else printf 'FIREFOX_' && printf 'STATUS=MISSING\\n'; fi; " +
+                        "if grep -q 'GALLIUM_DRIVER=llvmpipe' /usr/local/bin/dex-desktop && " +
+                        "test -x /usr/local/bin/dex-gpu; " +
+                        "then printf 'GRAPHICS_' && printf 'STATUS=ISOLATED\\n'; fi; " +
+                        "if grep -q '1.1.13' /etc/linux-on-dex-release; " +
+                        "then printf 'RELEASE_' && printf 'VERSION=1.1.13\\n'; fi; " +
                         "/usr/local/bin/dex-name-groups 2>/dev/null || true; " +
                         "if groups 2>&1 | grep -q 'cannot find name'; " +
                         "then printf 'GROUP_' && printf 'STATUS=INVALID\\n'; " +
@@ -114,8 +122,7 @@ class ProotXfceArtifactTest {
                 assertTrue("eglinfo failed inside Ubuntu: $output", output.contains("EGL_STATUS=0"))
                 assertTrue(
                     "Ubuntu Mesa did not render through the native virgl bridge: $output",
-                    output.contains("virgl", ignoreCase = true) &&
-                        !output.contains("llvmpipe", ignoreCase = true),
+                    output.contains("OpenGL core profile renderer: virgl", ignoreCase = true),
                 )
                 assertTrue(
                     "GNOME-like session started unexpected services: $output",
@@ -127,6 +134,12 @@ class ProotXfceArtifactTest {
                 )
                 assertTrue("TigerVNC is not capped at 240 FPS: $output", output.contains("FPS_STATUS=240"))
                 assertTrue("VS Code is not installed: $output", output.contains("CODE_STATUS=INSTALLED"))
+                assertTrue("Firefox is not installed: $output", output.contains("FIREFOX_STATUS=INSTALLED"))
+                assertTrue(
+                    "desktop and native application graphics are not isolated: $output",
+                    output.contains("GRAPHICS_STATUS=ISOLATED"),
+                )
+                assertTrue("release metadata is stale: $output", output.contains("RELEASE_VERSION=1.1.13"))
                 assertTrue("Android group IDs are unnamed: $output", output.contains("GROUP_STATUS=NAMED"))
             }
 
@@ -160,17 +173,18 @@ class ProotXfceArtifactTest {
                         ">/tmp/dex-xev-window 2>/dev/null; do attempt=${'$'}((attempt+1)); " +
                         "[ ${'$'}attempt -lt 50 ] || break; sleep 0.1; done; " +
                         "window=$(head -1 /tmp/dex-xev-window); " +
-                        "if [ -n \"${'$'}window\" ] && " +
-                        "DISPLAY=:1 xdotool windowactivate --sync \"${'$'}window\" && " +
-                        "DISPLAY=:1 xdotool windowfocus --sync \"${'$'}window\"; " +
-                        "then printf 'XEV_' && printf 'FOCUS=READY\\n'; fi; " +
+                        "if [ -n \"${'$'}window\" ]; " +
+                        "then printf 'XEV_' && printf 'WINDOW=READY\\n'; fi; " +
                         "printf 'XEV_' && printf 'SETUP_DONE\\n'\n"
                 it.write(startEventMonitor.toByteArray())
                 val readyOutput = readUntil(it, "XEV_SETUP_DONE", timeoutMs = 15_000)
                 assertTrue("xev setup did not complete: $readyOutput", readyOutput.contains("XEV_SETUP_DONE"))
-                assertTrue("xev window could not receive focus: $readyOutput", readyOutput.contains("XEV_FOCUS=READY"))
+                assertTrue("xev window was not mapped: $readyOutput", readyOutput.contains("XEV_WINDOW=READY"))
 
                 Thread.sleep(INPUT_MONITOR_SETTLE_MILLIS)
+                // The first real RFB click focuses the mapped test window. This
+                // matches DeX usage and avoids relying on optional EWMH focus
+                // hints that lightweight window managers need not implement.
                 assertTrue("RFB pointer move was rejected", client.sendPointerEvent(100, 100, 0))
                 assertTrue("RFB left press was rejected", client.sendPointerEvent(100, 100, 1))
                 assertTrue("RFB left release was rejected", client.sendPointerEvent(100, 100, 0))
@@ -302,7 +316,7 @@ class ProotXfceArtifactTest {
 
     companion object {
         private const val ROOTFS_ARCHIVE_NAME =
-            "linux-on-dex-ubuntu-24.04-proot-xfce-arm64.rootfs.tar.gz"
+            "linux-on-dex-ubuntu-24.04-proot-gnome-like-xfce-arm64.rootfs.tar.gz"
         private const val VIEWER_TIMEOUT_MILLIS = 10_000L
         private const val VIEWER_POLL_MILLIS = 50L
         private const val READER_JOIN_TIMEOUT_MILLIS = 2_000L

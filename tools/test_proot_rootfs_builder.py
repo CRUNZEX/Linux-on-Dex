@@ -26,6 +26,8 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         self.assertIn("trap handle_shutdown_signal HUP INT TERM", supervisor)
         self.assertNotIn("exec dbus-run-session", supervisor)
         self.assertIn("--renderer-process-limit=2", builder.VSCODE_WRAPPER_SCRIPT)
+        self.assertIn("GALLIUM_DRIVER=llvmpipe", supervisor)
+        self.assertNotIn("GALLIUM_DRIVER=virpipe", supervisor)
         syntax_check = subprocess.run(
             ["sh", "-n"],
             input=supervisor,
@@ -34,6 +36,36 @@ class ProotRootfsBuilderTest(unittest.TestCase):
             check=False,
         )
         self.assertEqual(0, syntax_check.returncode, syntax_check.stderr)
+
+    def test_native_gpu_is_opt_in_and_cannot_own_the_gnome_session(self) -> None:
+        rendered = builder._render_build_user_data("linuxondex")
+
+        self.assertIn("/usr/local/bin/dex-gpu", rendered)
+        self.assertIn("GALLIUM_DRIVER=virpipe", builder.GPU_WRAPPER_SCRIPT)
+        self.assertIn("GALLIUM_DRIVER=llvmpipe", builder.DESKTOP_PROFILE_SCRIPT)
+        self.assertIn("native Android virgl bridge is unavailable", builder.GPU_WRAPPER_SCRIPT)
+        self.assertNotIn("dex-gpu gnome-shell", rendered)
+
+    def test_firefox_is_bounded_for_android_process_and_graphics_limits(self) -> None:
+        rendered = builder._render_build_user_data("linuxondex")
+
+        self.assertIn("MOZ_WEBRENDER=0", builder.FIREFOX_WRAPPER_SCRIPT)
+        self.assertIn('"dom.ipc.processCount": 1', builder.FIREFOX_POLICIES)
+        self.assertIn("/usr/lib/firefox/distribution/policies.json", rendered)
+        yaml.safe_load(rendered)
+
+    def test_unused_dbus_helpers_cannot_consume_phantom_process_slots(self) -> None:
+        rendered = builder._render_build_user_data("linuxondex")
+
+        for service_name in (
+            "org.freedesktop.Accounts",
+            "org.freedesktop.ColorManager",
+            "org.freedesktop.GeoClue2",
+            "org.freedesktop.ModemManager1",
+            "org.gnome.Shell.CalendarServer",
+        ):
+            self.assertIn(service_name, rendered)
+        self.assertIn('rm -f "/usr/share/dbus-1/services/$service.service"', rendered)
 
     def test_firefox_uses_verified_mozilla_deb_and_proot_wrapper(self) -> None:
         rendered = builder._render_build_user_data("linuxondex")
@@ -57,6 +89,7 @@ class ProotRootfsBuilderTest(unittest.TestCase):
 
         self.assertIn("usr/bin/gnome-shell", entries)
         self.assertIn("usr/local/bin/firefox", entries)
+        self.assertIn("usr/local/bin/dex-gpu", entries)
         self.assertIn("usr/lib/firefox/firefox", entries)
         self.assertNotIn("usr/bin/gnome-flashback", entries)
         self.assertNotIn("usr/bin/gnome-panel", entries)

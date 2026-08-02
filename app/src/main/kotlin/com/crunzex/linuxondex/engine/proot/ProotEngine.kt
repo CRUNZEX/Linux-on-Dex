@@ -75,7 +75,7 @@ class ProotEngine(
     private var graphicsBridgeEnabled = false
 
     /** Terminal shells spawned for the desktop mode, killed on stop. */
-    private val consoleShells = CopyOnWriteArrayList<Process>()
+    private val consoleShells = CopyOnWriteArrayList<ConsoleShellProcess>()
 
     override suspend fun start(config: VmConfig) = lifecycleMutex.withLock {
         check(!_state.value.isBusy && !_state.value.isRunning) {
@@ -446,8 +446,26 @@ class ProotEngine(
     }
 
     private fun closeConsoleShells() {
-        consoleShells.forEach { shell -> runCatching { shell.destroyForcibly() } }
+        consoleShells.forEach(::terminateConsoleShell)
         consoleShells.clear()
+    }
+
+    /**
+     * Ends the complete PRoot -> script -> bash tree owned by one terminal.
+     * Descendants must be reaped before their launcher or Android reparents
+     * them and counts each orphan against the 32-process phantom limit.
+     */
+    private fun terminateConsoleShell(shell: ConsoleShellProcess) {
+        runCatching { reaper.killGuestProcessTree(shell.processId) }
+            .onFailure { error ->
+                AppLog.warn(SCOPE, "could not reap a closed console process tree", error)
+            }
+        if (shell.process.isAlive) runCatching { shell.process.destroyForcibly() }
+        runCatching {
+            shell.process.waitFor(CONSOLE_FORCE_KILL_WAIT_MILLIS, TimeUnit.MILLISECONDS)
+        }
+        consoleShells.remove(shell)
+        shell.processIdFile.delete()
     }
 
     // ---- Consoles ---------------------------------------------------------------
@@ -465,16 +483,26 @@ class ProotEngine(
             ?: return if (index <= 0) SessionPipeConsole(session) else null
 
         return try {
-            val shell = ProotCommandFactory
+            val processIdFile = File.createTempFile(
+                CONSOLE_PROCESS_ID_FILE_PREFIX,
+                CONSOLE_PROCESS_ID_FILE_SUFFIX,
+                paths.tmpDir,
+            )
+            val trackedProcess = ProotCommandFactory
                 .interactiveShell(
                     paths = paths,
                     rootfsDir = rootfsDir,
                     sharedFolderDir = paths.sharedFolderDir,
                     graphicsBridgeEnabled = graphicsBridgeEnabled && graphicsBridge.isRunning,
                 )
-                .start(redirectErrorStream = true)
+                .startTracked(processIdFile, redirectErrorStream = true)
+            val shell = ConsoleShellProcess(
+                process = trackedProcess.process,
+                processId = trackedProcess.processId,
+                processIdFile = processIdFile,
+            )
             consoleShells += shell
-            OwnedShellConsole(shell) { consoleShells.remove(shell) }
+            OwnedShellConsole(shell.process) { terminateConsoleShell(shell) }
         } catch (error: Exception) {
             AppLog.warn(SCOPE, "could not open a shell into the rootfs", error)
             null
@@ -568,6 +596,8 @@ class ProotEngine(
         private val shell: Process,
         private val onClosed: () -> Unit,
     ) : SerialConsoleConnection {
+        private val closed = AtomicBoolean(false)
+
         override fun read(buffer: ByteArray): Int = shell.inputStream.read(buffer)
 
         override fun write(data: ByteArray) {
@@ -576,8 +606,7 @@ class ProotEngine(
         }
 
         override fun close() {
-            runCatching { shell.destroyForcibly() }
-            onClosed()
+            if (closed.compareAndSet(false, true)) onClosed()
         }
     }
 
@@ -595,6 +624,9 @@ class ProotEngine(
         /** Long enough for a broken container to fail, short enough not to stall. */
         private const val CONSOLE_STARTUP_GRACE_MILLIS = 1_500L
         private const val FORCE_KILL_WAIT_SECONDS = 3L
+        private const val CONSOLE_FORCE_KILL_WAIT_MILLIS = 500L
+        private const val CONSOLE_PROCESS_ID_FILE_PREFIX = "proot-console-"
+        private const val CONSOLE_PROCESS_ID_FILE_SUFFIX = ".pid"
 
         /**
          * GNOME's very first start builds font and icon caches on top of
@@ -611,6 +643,12 @@ class ProotEngine(
         private const val EXIT_CODE_SIGKILL = 137
         private const val EXIT_CODE_SIGTERM = 143
     }
+
+    private data class ConsoleShellProcess(
+        val process: Process,
+        val processId: Int,
+        val processIdFile: File,
+    )
 }
 
 /** "1280x800" — the geometry text X servers take. */

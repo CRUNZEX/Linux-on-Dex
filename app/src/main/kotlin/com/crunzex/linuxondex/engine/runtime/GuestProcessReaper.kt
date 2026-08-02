@@ -25,6 +25,40 @@ import java.io.File
 class GuestProcessReaper(private val paths: VmPaths) {
 
     /**
+     * Terminates one owned launcher and only its guest descendants.
+     *
+     * Desktop terminal windows use a separate PRoot -> script -> bash tree.
+     * Killing only PRoot reparents script and bash to Android's init process,
+     * leaking three phantom-process slots per closed terminal. Those leaks
+     * eventually make Android trim Xvnc and the whole graphical session.
+     */
+    fun killGuestProcessTree(rootProcessId: Int): Int {
+        val snapshots = runCatching(::readProcessTable).getOrElse { failure ->
+            AppLog.warn(SCOPE, "could not scan the owned guest process tree", failure)
+            return 0
+        }
+        val safeGuestProcessIds = GuestProcessSet.runningInsideGuestDirectories(
+            snapshots = snapshots,
+            guestDirectoryPaths = guestDirectoryPaths(),
+            ownProcessId = AndroidProcess.myPid(),
+        ).toSet()
+        val processTree = listOf(rootProcessId) +
+            GuestProcessSet.descendantProcessIds(snapshots, rootProcessId)
+        val processIdsToKill = processTree
+            .filter(safeGuestProcessIds::contains)
+            .asReversed()
+
+        if (processIdsToKill.isEmpty()) return 0
+        val killedCount = processIdsToKill.count(::killProcess)
+        AppLog.debug(
+            SCOPE,
+            "ended owned process tree rooted at $rootProcessId: " +
+                processIdsToKill.joinToString(", "),
+        )
+        return killedCount
+    }
+
+    /**
      * Kills every guest process still running and returns how many there
      * were.
      *
@@ -98,8 +132,18 @@ class GuestProcessReaper(private val paths: VmPaths) {
             processId = processId,
             executablePath = readExecutablePath(processDirectory),
             commandLine = readCommandLine(processDirectory),
+            parentProcessId = readParentProcessId(processDirectory),
         )
     }
+
+    private fun readParentProcessId(processDirectory: File): Int? = runCatching {
+        processDirectory.resolve(PROCESS_STATUS_FILE_NAME).useLines { lines ->
+            lines.firstOrNull { line -> line.startsWith(PARENT_PROCESS_ID_PREFIX) }
+                ?.substringAfter(':')
+                ?.trim()
+                ?.toIntOrNull()
+        }
+    }.getOrNull()
 
     private fun readExecutablePath(processDirectory: File): String? = runCatching {
         Os.readlink(File(processDirectory, "exe").absolutePath)
@@ -116,6 +160,8 @@ class GuestProcessReaper(private val paths: VmPaths) {
     companion object {
         private const val SCOPE = "GuestProcessReaper"
         private const val PROC_DIRECTORY = "/proc"
+        private const val PROCESS_STATUS_FILE_NAME = "status"
+        private const val PARENT_PROCESS_ID_PREFIX = "PPid:"
 
         /** /proc/<pid>/cmdline joins arguments with NUL. */
         private const val ARGUMENT_SEPARATOR = '\u0000'

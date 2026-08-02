@@ -35,7 +35,7 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
-RELEASE_VERSION = "1.1.12"
+RELEASE_VERSION = "1.1.13"
 
 
 @dataclass(frozen=True)
@@ -203,6 +203,8 @@ def _render_build_user_data(password: str) -> str:
     supervisor = _indent_for_write_files(DESKTOP_SUPERVISOR_SCRIPT)
     code_wrapper = _indent_for_write_files(VSCODE_WRAPPER_SCRIPT)
     firefox_wrapper = _indent_for_write_files(FIREFOX_WRAPPER_SCRIPT)
+    firefox_policies = _indent_for_write_files(FIREFOX_POLICIES)
+    gpu_wrapper = _indent_for_write_files(GPU_WRAPPER_SCRIPT)
     fps_benchmark = _indent_for_write_files(FPS_BENCHMARK_SCRIPT)
     process_budget = _indent_for_write_files(PROCESS_BUDGET_SCRIPT)
     group_namer = _indent_for_write_files(GROUP_NAMER_SCRIPT)
@@ -260,6 +262,17 @@ write_files:
     permissions: "0755"
     content: |
 {firefox_wrapper}
+  # Full GNOME Shell stays on the stable software compositor. Applications
+  # that benefit from the validated Android virgl bridge can opt in without
+  # making a failed application context take down the entire desktop.
+  - path: /usr/local/bin/dex-gpu
+    permissions: "0755"
+    content: |
+{gpu_wrapper}
+  - path: /opt/linux-on-dex/firefox-policies.json
+    permissions: "0644"
+    content: |
+{firefox_policies}
   # Gives Android's supplementary group ids names inside the container.
   - path: /usr/local/bin/dex-name-groups
     permissions: "0755"
@@ -354,6 +367,7 @@ runcmd:
       apt-get update
       apt-get install -y firefox
       install -m 0755 /opt/linux-on-dex/firefox-wrapper /usr/local/bin/firefox
+      install -D -m 0644 /opt/linux-on-dex/firefox-policies.json /usr/lib/firefox/distribution/policies.json
       test -x /usr/lib/firefox/firefox
       test -x /usr/local/bin/firefox
     ) || echo 'DEX_BAKE_STEP_FAILED: firefox install'
@@ -396,8 +410,11 @@ runcmd:
     done
     for service in org.gnome.OnlineAccounts org.gnome.Identity \
                    org.freedesktop.PackageKit org.freedesktop.UPower \
+                   org.freedesktop.Accounts org.freedesktop.ColorManager \
+                   org.freedesktop.GeoClue2 org.freedesktop.ModemManager1 \
                    org.freedesktop.portal.Desktop org.freedesktop.portal.Documents \
                    org.freedesktop.impl.portal.desktop.gtk \
+                   org.gnome.Shell.CalendarServer \
                    org.gnome.evolution.dataserver.Sources5 \
                    org.gnome.evolution.dataserver.Calendar8 \
                    org.gnome.evolution.dataserver.AddressBook10 \
@@ -582,16 +599,16 @@ export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_DESKTOP=gnome
 export XDG_SESSION_MODE=user
 export GDMSESSION=gnome-xorg
-# Use the native virgl bridge after the app has validated it with EGL. Keep a
-# predictable llvmpipe fallback for devices whose Android EGL cannot start.
+# GNOME Shell/Mutter owns the whole visible desktop. Keep that compositor on
+# llvmpipe even when the app has validated virgl: vendor EGL resets during an
+# application launch otherwise terminate Mutter and leave Xvnc showing a
+# black root window. `dex-gpu <command>` remains available for explicit native
+# acceleration without putting the session leader on that failure domain.
+export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
 if [ "${DEX_GPU_BRIDGE:-0}" = 1 ]; then
-    export LIBGL_ALWAYS_SOFTWARE=1
-    export GALLIUM_DRIVER=virpipe
-    export MESA_GL_VERSION_OVERRIDE=3.3
-    export MESA_GLES_VERSION_OVERRIDE=3.1
-    log "native Android virgl bridge enabled"
+    log "stable llvmpipe compositor; native virgl available through dex-gpu"
 else
-    export LIBGL_ALWAYS_SOFTWARE=1
     log "native GPU bridge unavailable; using llvmpipe"
 fi
 export GSK_RENDERER=cairo
@@ -711,7 +728,7 @@ while kill -0 "$XVNC_PID" 2>/dev/null; do
         restart_attempt=$((restart_attempt + 1))
     fi
     restart_delay=$restart_attempt
-    if [ "$restart_delay" -gt 10 ]; then restart_delay=10; fi
+    if [ "$restart_delay" -gt 3 ]; then restart_delay=3; fi
     log "GNOME exited with code $session_exit_code; restarting in ${restart_delay}s"
     sleep "$restart_delay"
 done
@@ -741,12 +758,52 @@ exec /usr/share/code/code \
 
 FIREFOX_WRAPPER_SCRIPT = r"""#!/bin/sh
 # Firefox's Linux content sandbox requires namespaces that PRoot cannot
-# create. Keep the exception scoped to Firefox inside this single-user
-# container; normal TLS and site isolation remain enabled.
+# create. Keep both its process count and rendering path bounded: Firefox is
+# the heaviest preinstalled application and must not exhaust Android's child
+# process budget or share the compositor's graphics failure domain.
 export MOZ_DISABLE_CONTENT_SANDBOX=1
 export MOZ_DISABLE_GMP_SANDBOX=1
+export MOZ_DISABLE_RDD_SANDBOX=1
+export MOZ_DISABLE_GPU_SANDBOX=1
 export MOZ_ENABLE_WAYLAND=0
+export MOZ_WEBRENDER=0
+export MOZ_X11_EGL=0
 exec /usr/lib/firefox/firefox --no-remote "$@"
+"""
+
+FIREFOX_POLICIES = r"""{
+  "policies": {
+    "Preferences": {
+      "browser.tabs.remote.autostart": false,
+      "dom.ipc.processCount": 1,
+      "dom.ipc.processCount.webIsolated": 1,
+      "dom.ipc.processCount.webLargeAllocation": 1,
+      "fission.autostart": false
+    }
+  }
+}
+"""
+
+GPU_WRAPPER_SCRIPT = r"""#!/bin/sh
+# Opt-in native rendering for applications after the Android host and guest
+# probe have both succeeded. GNOME Shell itself deliberately never uses this
+# wrapper, so a failed application context cannot blank the desktop.
+set -eu
+
+if [ "${DEX_GPU_BRIDGE:-0}" != 1 ] || [ ! -S "${VTEST_SOCKET_NAME:-/tmp/.virgl_test}" ]; then
+    echo "dex-gpu: the native Android virgl bridge is unavailable" >&2
+    exit 69
+fi
+if [ "$#" -eq 0 ]; then
+    echo "usage: dex-gpu <command> [arguments...]" >&2
+    exit 64
+fi
+
+export GALLIUM_DRIVER=virpipe
+export LIBGL_ALWAYS_SOFTWARE=1
+export MESA_GL_VERSION_OVERRIDE=3.3
+export MESA_GLES_VERSION_OVERRIDE=3.1
+exec "$@"
 """
 
 # Apps may not bind ports below 1024, and the phone's own network must not
@@ -975,6 +1032,7 @@ export COLORTERM=truecolor
 
 DESKTOP_PROFILE_SCRIPT = """export DISPLAY="${DISPLAY:-:1}"
 export LIBGL_ALWAYS_SOFTWARE=1
+export GALLIUM_DRIVER=llvmpipe
 export GSK_RENDERER=cairo
 """
 
@@ -989,6 +1047,7 @@ REQUIRED_ARCHIVE_ENTRIES = (
     "usr/local/bin/firefox",
     "usr/local/bin/dex-fps",
     "usr/local/bin/dex-processes",
+    "usr/local/bin/dex-gpu",
     "usr/bin/glxgears",
     "usr/bin/Xtigervnc",
     "usr/bin/gnome-shell",
