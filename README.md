@@ -13,6 +13,10 @@ A real Linux VM with its own kernel - so **Podman, Docker and LXC** work exactly
 
 <img src="docs/images/01_screenshot.jpg" alt="Linux on DeX and a terminal side by side on Samsung DeX: the VM running a MongoDB container while the Monitor page charts CPU, memory, power and temperature" width="800" />
 
+<img src="docs/images/05_screenshot.jpg" alt="UbuntuVM with Gnome" width="800" />
+
+<img src="docs/images/06_screenshot.jpg" alt="Ubuntu Proot with Gnome" width="800" />
+
 <img src="docs/images/02_screenshot.jpg" alt="Two terminal windows on Samsung DeX: an AI coding CLI working inside the VM next to docker ps listing a running container" width="800" />
 
 <img src="docs/images/03_screenshot.jpg" alt="VS Code (code-server) served from the VM, open in an Android browser at localhost through port forwarding" width="800" />
