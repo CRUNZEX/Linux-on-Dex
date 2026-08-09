@@ -46,7 +46,7 @@ A real Linux VM with its own kernel - so **Podman, Docker and LXC** work exactly
 
 ## Display architecture
 
-Version `1.3.0-beta4` keeps the two runtimes separate:
+Version `1.3.0-beta5` keeps the two runtimes separate:
 
 ```text
 QEMU  -> VirtIO GPU -> QEMU VNC server -> RfbClient -> VncView
@@ -55,7 +55,9 @@ PRoot -> X11 applications -> Unix X11 socket -> native X server -> SurfaceView
 
 The QEMU path follows the same local-RFB principle used by Proxmox/noVNC, but uses the app's native RFB client instead of a browser. It remains bound to `127.0.0.1`; VNC is also the compatibility fallback for PRoot images built before `1.3.0-beta1`.
 
-New PRoot images contain `/usr/local/share/linux-on-dex/display-backend` with `native-x11`. They do not include TigerVNC. X11 clients communicate through `/tmp/.X11-unix/X1`, while OpenGL applications may opt into the separately verified virgl bridge. The X server runs in a private, bound `:x11` Android service process instead of an `app_process` child. Beta 4 also loads the renderer through Android's native-library loader, fixing APK-internal paths being passed to `dlopen`. Beta 2 rootfs artifacts remain compatible because the guest socket contract is unchanged.
+New PRoot images contain `/usr/local/share/linux-on-dex/display-backend` with `native-x11`. They do not include TigerVNC. X11 clients communicate through `/tmp/.X11-unix/X1`, while OpenGL applications may opt into the separately verified virgl bridge. The X server runs in a private, bound `:x11` Android service process instead of an `app_process` child. Beta 4 also loads the renderer through Android's native-library loader, fixing APK-internal paths being passed to `dlopen`.
+
+Beta 5 makes the native display actually reachable: the session's `/tmp` is a short fixed host directory (`files/vm/guest-tmp`) bound into every PRoot command, because a Unix socket path is limited to 108 bytes and the old socket location inside the extracted image directory exceeded it — the X server could never bind. The same bind gives terminals and the desktop one shared `/tmp`, so `DISPLAY=:1` works from any shell. Beta 2 rootfs artifacts remain compatible because the in-guest socket contract (`/tmp/.X11-unix/X1`) is unchanged.
 
 After a PRoot archive is extracted and stamped successfully, the app replaces only its imported compressed copy with a small descriptor; the original file selected in the document picker is not modified. This avoids retaining the compressed archive beside the expanded rootfs. Extraction keeps 2 GB of Android storage in reserve, and each start clears session-only VM cache files. A portable PRoot backup still requires the original archive to be retained or reimported.
 

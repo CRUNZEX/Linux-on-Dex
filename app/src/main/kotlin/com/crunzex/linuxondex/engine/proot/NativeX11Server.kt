@@ -13,7 +13,12 @@ import java.util.concurrent.TimeUnit
 
 /** Owns the embedded X server independently of the PRoot guest processes. */
 interface NativeX11Server {
-    fun start(rootfsDir: File, displayNumber: Int)
+    /**
+     * [guestTmpDir] is the short host directory the session binds over the
+     * guest's /tmp; the X server publishes its display socket inside it.
+     * [rootfsDir] is only read for keyboard (XKB) data.
+     */
+    fun start(rootfsDir: File, guestTmpDir: File, displayNumber: Int)
     fun isAlive(): Boolean
     fun diagnosticStatus(): String
     fun stop()
@@ -42,7 +47,7 @@ class AppManagedNativeX11Server(
     @Volatile
     private var serviceBinder: IBinder? = null
 
-    override fun start(rootfsDir: File, displayNumber: Int) {
+    override fun start(rootfsDir: File, guestTmpDir: File, displayNumber: Int) {
         check(activeConnection == null) { "native X11 is already bound" }
         statusFile.delete()
 
@@ -76,7 +81,7 @@ class AppManagedNativeX11Server(
 
         val bound = runCatching {
             appContext.bindService(
-                NativeX11Service.bindingIntent(appContext, rootfsDir, displayNumber),
+                NativeX11Service.bindingIntent(appContext, rootfsDir, guestTmpDir, displayNumber),
                 connection,
                 Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT,
             )
@@ -111,9 +116,14 @@ class AppManagedNativeX11Server(
     override fun isAlive(): Boolean =
         activeConnection != null && serviceBinder?.isBinderAlive == true
 
-    override fun diagnosticStatus(): String = runCatching {
-        statusFile.takeIf(File::isFile)?.readText()?.trim()
-    }.getOrNull().takeUnless { it.isNullOrEmpty() } ?: "no X11 service status"
+    override fun diagnosticStatus(): String {
+        val lastStatus = runCatching {
+            statusFile.takeIf(File::isFile)?.readText()?.trim()
+        }.getOrNull().takeUnless { it.isNullOrEmpty() } ?: "no X11 service status"
+        // The status file survives the process; a stale "running" line must
+        // not read as if the server were still alive.
+        return if (isAlive()) lastStatus else "$lastStatus (X11 process has exited)"
+    }
 
     override fun stop() {
         activeConnection?.let(::stopConnection)

@@ -123,6 +123,49 @@ class ProotCommandFactoryTest {
     }
 
     @Test
+    fun `every session shares one short host directory as its tmp`() {
+        val guestTmpBind = "${paths.prootGuestTmpDir}:${ProotCommandFactory.GUEST_TMP_GUEST_PATH}"
+        val sessions = listOf(
+            desktopCommand(),
+            ProotCommandFactory.consoleSession(paths, rootfsDir, sharedFolderDir = null),
+            ProotCommandFactory.interactiveShell(paths, rootfsDir, sharedFolderDir = null),
+            ProotCommandFactory.graphicsProbe(paths, rootfsDir),
+        )
+
+        sessions.forEach { command ->
+            assertTrue(
+                "session must see the X11 socket in /tmp: ${command.arguments}",
+                command.arguments.zipWithNext().any { (flag, bind) ->
+                    flag == "-b" && bind == guestTmpBind
+                },
+            )
+        }
+    }
+
+    @Test
+    fun `virgl socket bind comes after the tmp bind it nests inside`() {
+        val arguments = ProotCommandFactory.desktopSession(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            displayResolution = "1280x800",
+            vncPort = 5901,
+            sharedFolderDir = null,
+            graphicsBridgeEnabled = true,
+        ).arguments
+
+        val tmpBindIndex = arguments.indexOfFirst { it.endsWith(":/tmp") }
+        val virglBindIndex = arguments.indexOfFirst {
+            it.endsWith(":${ProotCommandFactory.VIRGL_SOCKET_GUEST_PATH}")
+        }
+        assertTrue("tmp bind missing", tmpBindIndex >= 0)
+        assertTrue("virgl bind missing", virglBindIndex >= 0)
+        assertTrue(
+            "PRoot applies binds in order; the nested path must come second",
+            tmpBindIndex < virglBindIndex,
+        )
+    }
+
+    @Test
     fun `shared folder is bound when available and skipped when not`() {
         val withFolder = desktopCommand().arguments
         val without = ProotCommandFactory.desktopSession(

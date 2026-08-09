@@ -34,7 +34,7 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
-RELEASE_VERSION = "1.3.0-beta2"
+RELEASE_VERSION = "1.3.0-beta5"
 
 
 @dataclass(frozen=True)

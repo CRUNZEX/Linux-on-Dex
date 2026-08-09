@@ -65,6 +65,18 @@ class VmPaths(
      */
     val prootSharedMemoryDir: File = vmRootDir.resolve("proot-shm")
 
+    /**
+     * Bound into PRoot guests as /tmp, and the embedded X server's TMPDIR —
+     * so the display socket both sides share lives at `<this>/.X11-unix/X1`.
+     *
+     * It must be this short fixed path, not the extracted image's own tmp: a
+     * Unix socket path is limited to 108 bytes, and a path through the image
+     * directory grows with the archive's file name — the stock GNOME image's
+     * name already pushed it to 117 bytes, which made every X11 bind fail
+     * with "Cannot establish any listening sockets".
+     */
+    val prootGuestTmpDir: File = vmRootDir.resolve("guest-tmp")
+
     val socketsDir: File = vmRootDir.resolve("sockets")
     val virglSocket: File = socketsDir.resolve("virgl-renderer.sock")
     val logsDir: File = vmRootDir.resolve("logs")
@@ -112,7 +124,7 @@ class VmPaths(
     fun createRuntimeDirectories() {
         listOf(
             vmRootDir, qemuDataDir, disksDir, isosDir, prootRootfsDir,
-            prootImagesDir, prootSharedMemoryDir,
+            prootImagesDir, prootSharedMemoryDir, prootGuestTmpDir,
             socketsDir, logsDir, tmpDir, screenshotsDir,
         ).forEach { directory -> directory.mkdirs() }
         sharedFolderDir?.mkdirs()

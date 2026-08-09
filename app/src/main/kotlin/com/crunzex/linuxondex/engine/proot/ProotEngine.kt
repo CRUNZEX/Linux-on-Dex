@@ -7,6 +7,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -131,6 +134,7 @@ class ProotEngine(
      */
     private fun startRootfsImageLocked(config: VmConfig, image: PreparedImageConfig) {
         val rootfsDir = extractImageReportingProgress(File(image.diskImagePath))
+        prepareGuestTmpDir()
         if (rootfsDir.resolve(DESKTOP_SUPERVISOR_RELATIVE_PATH).exists()) {
             startDesktopSessionLocked(config, rootfsDir)
         } else {
@@ -244,18 +248,40 @@ class ProotEngine(
         if (!xkbRoot.isDirectory) {
             throw LxdError.BootFailed("the rootfs is missing XKB data at /usr/share/X11/xkb")
         }
-        val rootfsTmp = rootfsDir.resolve("tmp").apply { mkdirs() }
-        rootfsTmp.resolve(".X11-unix").apply { mkdirs() }
-            .resolve("X${ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER}").delete()
-        rootfsTmp.resolve(".X${ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER}-lock").delete()
         nativeX11Server.start(
             rootfsDir = rootfsDir,
+            guestTmpDir = paths.prootGuestTmpDir,
             displayNumber = ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER,
         )
     }
 
+    /**
+     * A fresh /tmp for the session, world-writable-with-sticky like a real
+     * one. The mode matters twice: the X server refuses a `.X11-unix` whose
+     * mode it does not trust, and Java's File API cannot express the sticky
+     * bit — so both directories are set through [Os.chmod].
+     */
+    private fun prepareGuestTmpDir() {
+        val guestTmp = paths.prootGuestTmpDir
+        if (guestTmp.exists() && !guestTmp.deleteRecursively()) {
+            throw LxdError.StorageFailed("could not reset the guest /tmp directory")
+        }
+        val x11SocketDir = guestTmp.resolve(X11_SOCKET_DIR_NAME)
+        if (!x11SocketDir.mkdirs()) {
+            throw LxdError.StorageFailed("could not create the guest /tmp directory")
+        }
+        try {
+            Os.chmod(guestTmp.absolutePath, WORLD_WRITABLE_STICKY_MODE)
+            Os.chmod(x11SocketDir.absolutePath, WORLD_WRITABLE_STICKY_MODE)
+        } catch (error: ErrnoException) {
+            throw LxdError.StorageFailed("could not set guest /tmp permissions", error)
+        }
+    }
+
     private fun waitForNativeXServer(sessionProcess: Process, rootfsDir: File) {
-        val socket = rootfsDir.resolve(NATIVE_X11_SOCKET_RELATIVE_PATH)
+        val socket = paths.prootGuestTmpDir
+            .resolve(X11_SOCKET_DIR_NAME)
+            .resolve("X${ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER}")
         val deadline = System.currentTimeMillis() + DESKTOP_STARTUP_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             if (!sessionProcess.isAlive) {
@@ -274,7 +300,7 @@ class ProotEngine(
             Thread.sleep(DISPLAY_POLL_INTERVAL_MS)
         }
         throw LxdError.BootFailed(
-            "the native X server did not publish $NATIVE_X11_SOCKET_RELATIVE_PATH within " +
+            "the native X server did not publish its display socket within " +
                 "${DESKTOP_STARTUP_TIMEOUT_MS / 1000}s: ${nativeX11Server.diagnosticStatus()}"
         )
     }
@@ -696,7 +722,12 @@ class ProotEngine(
             "usr/local/share/linux-on-dex/display-backend"
         private const val NATIVE_X11_MARKER = "native-x11"
         private const val XKB_CONFIG_ROOT_RELATIVE_PATH = "usr/share/X11/xkb"
-        private const val NATIVE_X11_SOCKET_RELATIVE_PATH = "tmp/.X11-unix/X1"
+        private const val X11_SOCKET_DIR_NAME = ".X11-unix"
+
+        /** 01777 — /tmp semantics (sticky + rwx for everyone). */
+        private val WORLD_WRITABLE_STICKY_MODE =
+            OsConstants.S_ISVTX or OsConstants.S_IRWXU or
+                OsConstants.S_IRWXG or OsConstants.S_IRWXO
 
         /** Long enough for a broken container to fail, short enough not to stall. */
         private const val CONSOLE_STARTUP_GRACE_MILLIS = 1_500L

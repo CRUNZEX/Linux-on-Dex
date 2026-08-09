@@ -150,6 +150,11 @@ object ProotCommandFactory {
      * compile out and X11 clients ask for (MIT-SHM).
      * /dev/shm does not exist on Android, so a private directory is bound
      * there for POSIX shared memory.
+     * /tmp is a short host directory shared by the whole session: the X11
+     * display socket must live on a path that fits a 108-byte sockaddr_un,
+     * which a path inside the extracted image cannot guarantee, and every
+     * shell must see the same /tmp as the desktop or DISPLAY=:1 would point
+     * at a socket that terminal-launched programs cannot find.
      */
     private fun rootfsArguments(
         paths: VmPaths,
@@ -167,6 +172,7 @@ object ProotCommandFactory {
             "-b", "/proc",
             "-b", "/sys",
             "-b", "${paths.prootSharedMemoryDir.absolutePath}:/dev/shm",
+            "-b", "${paths.prootGuestTmpDir.absolutePath}:$GUEST_TMP_GUEST_PATH",
         )
         if (sharedFolderDir != null) {
             // The same folder the QEMU guests see over 9p, reachable from
@@ -239,6 +245,7 @@ object ProotCommandFactory {
     const val DESKTOP_SUPERVISOR_GUEST_PATH = "/usr/local/bin/dex-desktop"
     const val CONSOLE_SESSION_GUEST_PATH = "/usr/local/bin/dex-session"
     const val SHARED_FOLDER_GUEST_PATH = "/root/shared"
+    const val GUEST_TMP_GUEST_PATH = "/tmp"
     const val VIRGL_SOCKET_GUEST_PATH = "/tmp/.virgl_test"
     const val NATIVE_X11_DISPLAY_NUMBER = 1
     const val NATIVE_X11_DISPLAY = ":$NATIVE_X11_DISPLAY_NUMBER"

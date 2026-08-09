@@ -28,7 +28,7 @@ from pathlib import Path
 
 
 UBUNTU_BASE_DIGEST = "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
-RELEASE_VERSION = "1.3.0-beta2"
+RELEASE_VERSION = "1.3.0-beta5"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = (

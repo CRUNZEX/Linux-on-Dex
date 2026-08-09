@@ -65,6 +65,26 @@ class VmPathsRootfsTest {
     }
 
     @Test
+    fun `the X11 socket path fits a sockaddr_un for the real package name`() {
+        // bind() rejects unix socket paths of 108 bytes or more. The socket
+        // lives in the fixed guest-tmp directory precisely so that archive
+        // file names (which reached 117 bytes through the image directory)
+        // can never break the display again.
+        val realisticPaths = VmPaths(
+            nativeLibraryDir = File("/data/app/base.apk/lib/arm64"),
+            filesDir = File("/data/user/0/com.crunzex.linuxondex/files"),
+            cacheDir = File("/data/user/0/com.crunzex.linuxondex/cache"),
+            externalFilesDir = { null },
+        )
+        val socketPath = realisticPaths.prootGuestTmpDir.resolve(".X11-unix/X1").absolutePath
+
+        assertTrue(
+            "X11 socket path is ${socketPath.length} bytes: $socketPath",
+            socketPath.toByteArray().size < 100,
+        )
+    }
+
+    @Test
     fun `extraction lives on internal storage, never on FUSE`() {
         // External app storage cannot hold the symlinks a Linux rootfs needs.
         assertTrue(

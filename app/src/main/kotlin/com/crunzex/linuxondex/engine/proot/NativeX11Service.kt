@@ -26,19 +26,22 @@ class NativeX11Service : Service() {
 
     private fun startServer(intent: Intent) {
         val rootfsDir = validatedRootfs(intent.requireStringExtra(EXTRA_ROOTFS_PATH))
+        val guestTmpDir = validatedGuestTmp(intent.requireStringExtra(EXTRA_GUEST_TMP_PATH))
         val displayNumber = intent.getIntExtra(EXTRA_DISPLAY_NUMBER, INVALID_DISPLAY_NUMBER)
         require(displayNumber in VALID_DISPLAY_NUMBERS) { "invalid X11 display number" }
 
-        val tmpDir = rootfsDir.resolve("tmp").apply { mkdirs() }
         val xkbRoot = rootfsDir.resolve(XKB_CONFIG_ROOT_RELATIVE_PATH)
         require(xkbRoot.isDirectory) { "rootfs XKB data is missing" }
 
         writeStatus("starting managed X11 display :$displayNumber")
         try {
-            Os.setenv("TMPDIR", tmpDir.absolutePath, true)
+            // The X server derives its socket path from TMPDIR; the engine
+            // prepared this short directory so the path fits a sockaddr_un.
+            Os.setenv("TMPDIR", guestTmpDir.absolutePath, true)
             Os.setenv("XKB_CONFIG_ROOT", xkbRoot.absolutePath, true)
             serverEntry = EmbeddedX11ServerEntry.start(
-                arrayOf(":$displayNumber", "-nolisten", "tcp")
+                context = this,
+                arguments = arrayOf(":$displayNumber", "-nolisten", "tcp"),
             )
             writeStatus("managed X11 process running on :$displayNumber")
             AppLog.info(SCOPE, "managed X11 process running on :$displayNumber")
@@ -57,6 +60,14 @@ class NativeX11Service : Service() {
         }
         require(rootfsDir.isDirectory) { "rootfs directory is missing" }
         return rootfsDir
+    }
+
+    private fun validatedGuestTmp(path: String): File {
+        val guestTmpDir = File(path).canonicalFile
+        val expectedDir = File(filesDir, GUEST_TMP_RELATIVE_PATH).canonicalFile
+        require(guestTmpDir == expectedDir) { "unexpected guest tmp directory" }
+        require(guestTmpDir.isDirectory) { "guest tmp directory is missing" }
+        return guestTmpDir
     }
 
     private fun Intent.requireStringExtra(name: String): String =
@@ -90,17 +101,25 @@ class NativeX11Service : Service() {
         private const val SCOPE = "NativeX11Service"
         private const val ACTION_BIND = "com.crunzex.linuxondex.action.BIND_NATIVE_X11"
         private const val EXTRA_ROOTFS_PATH = "rootfs_path"
+        private const val EXTRA_GUEST_TMP_PATH = "guest_tmp_path"
         private const val EXTRA_DISPLAY_NUMBER = "display_number"
         private const val INVALID_DISPLAY_NUMBER = -1
         private const val PROOT_IMAGES_RELATIVE_PATH = "vm/proot-images"
+        private const val GUEST_TMP_RELATIVE_PATH = "vm/guest-tmp"
         private const val XKB_CONFIG_ROOT_RELATIVE_PATH = "usr/share/X11/xkb"
         private const val STATUS_FILE_RELATIVE_PATH = "vm/logs/$STATUS_FILE_NAME"
         private val VALID_DISPLAY_NUMBERS = 0..99
 
-        fun bindingIntent(context: Context, rootfsDir: File, displayNumber: Int): Intent =
+        fun bindingIntent(
+            context: Context,
+            rootfsDir: File,
+            guestTmpDir: File,
+            displayNumber: Int,
+        ): Intent =
             Intent(context, NativeX11Service::class.java)
                 .setAction(ACTION_BIND)
                 .putExtra(EXTRA_ROOTFS_PATH, rootfsDir.absolutePath)
+                .putExtra(EXTRA_GUEST_TMP_PATH, guestTmpDir.absolutePath)
                 .putExtra(EXTRA_DISPLAY_NUMBER, displayNumber)
     }
 }

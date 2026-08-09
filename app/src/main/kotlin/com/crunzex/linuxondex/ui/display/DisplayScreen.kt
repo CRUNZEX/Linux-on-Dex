@@ -47,6 +47,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.crunzex.linuxondex.core.AppLog
+import com.crunzex.linuxondex.engine.proot.EmbeddedX11ViewerDefaults
 import com.crunzex.linuxondex.display.vnc.ActiveConnectionOwner
 import com.crunzex.linuxondex.display.vnc.RfbClient
 import com.crunzex.linuxondex.display.vnc.VncView
@@ -171,6 +172,7 @@ private fun NativeX11DisplayScreen(onBack: (() -> Unit)?) {
     var launchError by remember { mutableStateOf<String?>(null) }
     val openDisplay = {
         launchError = runCatching {
+            EmbeddedX11ViewerDefaults.ensureApplied(context)
             context.startActivity(
                 Intent(context, com.termux.x11.MainActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
