@@ -20,7 +20,6 @@
     <application
         android:name=".LinuxOnDexApp"
         android:allowBackup="false"
-        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
@@ -74,6 +73,23 @@
             android:taskAffinity="com.crunzex.linuxondex.window.display"
             android:windowSoftInputMode="adjustResize" />
 
+        <!-- Embedded Termux:X11 renderer. Explicit launch only: replacing the
+             library declaration prevents a second launcher icon/home role. -->
+        <activity
+            android:name="com.termux.x11.MainActivity"
+            android:configChanges="fontScale|orientation|screenSize|keyboard|keyboardHidden|layoutDirection|locale|mcc|mnc|navigation|screenLayout|touchscreen|uiMode|smallestScreenSize|density"
+            android:exported="false"
+            android:label="Linux X11 Display"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:taskAffinity="com.crunzex.linuxondex.window.display.x11"
+            android:theme="@style/LorieAppTheme"
+            android:windowSoftInputMode="stateHidden|adjustNothing"
+            tools:node="replace" />
+        <activity
+            android:name="com.termux.x11.LoriePreferences"
+            android:exported="false"
+            tools:replace="android:exported" />
         <service
             android:name=".service.VmService"
             android:exported="false"
@@ -82,5 +98,10 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps a user-started Linux virtual machine running while the app is in the background." />
         </service>
+        <service
+            android:name=".engine.proot.NativeX11Service"
+            android:exported="false"
+            android:process=":x11"
+            android:stopWithTask="false" />
     </application>
 </manifest>

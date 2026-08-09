@@ -6,6 +6,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.core.LxdError
+import com.crunzex.linuxondex.engine.proot.RootfsImageInstaller
 import com.crunzex.linuxondex.engine.runtime.NativeCommand
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import java.io.File
@@ -80,6 +81,12 @@ class VmBackupManager(
         val source = diskManager.bootDiskFile(config)
         if (!source.isFile) {
             throw LxdError.StorageFailed("this virtual machine has nothing to back up yet")
+        }
+        if (RootfsImageInstaller.isReclaimedArchive(source)) {
+            throw LxdError.StorageFailed(
+                "the imported rootfs archive was reclaimed after extraction to save storage; " +
+                    "keep or reimport the original archive to create a portable backup"
+            )
         }
         val destination = File(backupDirectory(), backupFileName(source.name, now))
 

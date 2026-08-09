@@ -652,11 +652,11 @@ GNOME Shell on PRoot
     effects and blinking cursors in both cases. Lowering the display resolution
     remains the single biggest lever on the number you see.
 
-Display input and frame ceiling
-  The embedded viewer forwards DeX mouse buttons, wheel, hardware keyboard,
-  touch taps/drags and Android IME text directly over RFB. It never captures
-  the Android pointer. TigerVNC accepts up to 240 updates per second; the
-  visible rate is still capped by the phone or monitor refresh rate.
+Display input
+  QEMU desktops use the app's local RFB viewer. Current PRoot desktop images
+  contain no VNC server: applications connect to the embedded native X server
+  over /tmp/.X11-unix/X1, and its SurfaceView handles DeX mouse, keyboard,
+  touch and Android IME input. Older PRoot images retain their VNC fallback.
 
 Server images run one-time setup on first boot (account, disk grow), so
 that boot takes a little longer; afterwards every boot goes straight to

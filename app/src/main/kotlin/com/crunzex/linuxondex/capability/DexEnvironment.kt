@@ -111,8 +111,7 @@ object DexEnvironment {
      * own screen, which is what standalone DeX does.
      */
     private fun isPresentedOnExternalDisplay(context: Context): Boolean = try {
-        val display = context.display
-        display != null && display.displayId != Display.DEFAULT_DISPLAY
+        context.display.displayId != Display.DEFAULT_DISPLAY
     } catch (unavailable: Exception) {
         false
     }

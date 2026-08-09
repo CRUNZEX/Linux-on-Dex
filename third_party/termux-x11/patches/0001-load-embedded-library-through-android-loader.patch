@@ -1,0 +1,50 @@
+diff --git a/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java b/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java
+index 1baf27b..ccca759 100644
+--- a/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java
++++ b/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java
+@@ -179,23 +179,28 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
+         handler = new Handler();
+         ctx = createContext();
+ 
+-        String path = "lib/" + Build.SUPPORTED_ABIS[0] + "/libXlorie.so";
+-        ClassLoader loader = CmdEntryPoint.class.getClassLoader();
+-        URL res = loader != null ? loader.getResource(path) : null;
+-        String libPath = res != null ? res.getFile().replace("file:", "") : null;
+-        if (libPath != null) {
+-            try {
+-                System.load(libPath);
+-            } catch (Exception e) {
+-                Log.e("CmdEntryPoint", "Failed to dlopen " + libPath, e);
+-                System.err.println("Failed to load native library. Did you install the right apk? Try the universal one.");
+-                System.exit(134);
+-            }
+-        } else {
+-            // It is critical only when it is not running in Android application process
+-            if (MainActivity.getInstance() == null) {
+-                System.err.println("Failed to acquire native library. Did you install the right apk? Try the universal one.");
+-                System.exit(134);
++        try {
++            // Android application processes resolve extracted JNI libraries
++            // through their native-library namespace. This avoids treating a
++            // base.apk!/lib/... resource URL as a dlopen-compatible file.
++            System.loadLibrary("Xlorie");
++        } catch (UnsatisfiedLinkError applicationLoaderError) {
++            // The standalone app_process launcher has no application-native
++            // namespace, so retain its original classpath resource fallback.
++            String path = "lib/" + Build.SUPPORTED_ABIS[0] + "/libXlorie.so";
++            ClassLoader loader = CmdEntryPoint.class.getClassLoader();
++            URL res = loader != null ? loader.getResource(path) : null;
++            String libPath = res != null ? res.getFile().replace("file:", "") : null;
++            if (libPath != null) {
++                try {
++                    System.load(libPath);
++                } catch (Throwable fallbackError) {
++                    fallbackError.addSuppressed(applicationLoaderError);
++                    Log.e("CmdEntryPoint", "Failed to dlopen " + libPath, fallbackError);
++                    throw fallbackError;
++                }
++            } else if (MainActivity.getInstance() == null) {
++                throw applicationLoaderError;
+             }
+         }
+     }

@@ -18,12 +18,14 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         self.assertNotIn("openbox", builder.GUEST_PACKAGES)
         self.assertNotIn("apt-get purge -y gvfs", rendered)
 
-    def test_xvnc_survives_and_restarts_a_crashed_gnome_session(self) -> None:
+    def test_native_x11_survives_and_restarts_a_crashed_gnome_session(self) -> None:
         supervisor = builder.DESKTOP_SUPERVISOR_SCRIPT
 
-        self.assertIn('while kill -0 "$XVNC_PID"', supervisor)
+        self.assertIn('while [ -S /tmp/.X11-unix/X1 ]', supervisor)
         self.assertIn('GNOME exited with code $session_exit_code', supervisor)
         self.assertIn("trap handle_shutdown_signal HUP INT TERM", supervisor)
+        self.assertNotIn("Xtigervnc", supervisor)
+        self.assertNotIn("tigervnc-standalone-server", builder.GUEST_PACKAGES)
         self.assertNotIn("exec dbus-run-session", supervisor)
         self.assertIn("--renderer-process-limit=2", builder.VSCODE_WRAPPER_SCRIPT)
         self.assertIn("GALLIUM_DRIVER=llvmpipe", supervisor)
@@ -76,12 +78,11 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         self.assertIn("apt-get install -y firefox", rendered)
         self.assertIn("MOZ_DISABLE_CONTENT_SANDBOX=1", rendered)
 
-    def test_runtime_names_groups_before_session_and_caps_vnc_at_240(self) -> None:
+    def test_runtime_names_groups_before_native_x11_session(self) -> None:
         supervisor = builder.DESKTOP_SUPERVISOR_SCRIPT
 
-        self.assertLess(supervisor.index("dex-name-groups"), supervisor.index("Xtigervnc"))
-        self.assertIn("MAX_FRAME_RATE=240", supervisor)
-        self.assertIn('-FrameRate "$MAX_FRAME_RATE"', supervisor)
+        self.assertLess(supervisor.index("dex-name-groups"), supervisor.index("native X11 ready"))
+        self.assertIn("native-x11", builder._render_build_user_data("linuxondex"))
         self.assertIn("flock 9", builder.GROUP_NAMER_SCRIPT)
 
     def test_release_archive_requires_shell_code_and_firefox(self) -> None:
@@ -91,6 +92,8 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         self.assertIn("usr/local/bin/firefox", entries)
         self.assertIn("usr/local/bin/dex-gpu", entries)
         self.assertIn("usr/lib/firefox/firefox", entries)
+        self.assertIn("usr/local/share/linux-on-dex/display-backend", entries)
+        self.assertNotIn("usr/bin/Xtigervnc", entries)
         self.assertNotIn("usr/bin/gnome-flashback", entries)
         self.assertNotIn("usr/bin/gnome-panel", entries)
         self.assertNotIn("usr/bin/openbox", entries)

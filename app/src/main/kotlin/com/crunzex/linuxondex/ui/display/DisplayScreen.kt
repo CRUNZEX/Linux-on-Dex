@@ -1,6 +1,7 @@
 package com.crunzex.linuxondex.ui.display
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
@@ -16,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
@@ -24,6 +26,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.platform.LocalContext
 import androidx.annotation.VisibleForTesting
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,19 +50,36 @@ import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.display.vnc.ActiveConnectionOwner
 import com.crunzex.linuxondex.display.vnc.RfbClient
 import com.crunzex.linuxondex.display.vnc.VncView
+import com.crunzex.linuxondex.vm.DisplayEndpoint
 
 /**
- * Graphical display: full-bleed VNC surface over the local QEMU server.
- * On DeX this is effectively a desktop monitor; on the phone, tap/drag/long
- * press emulate the mouse and the soft keyboard types into the guest.
+ * Routes QEMU/legacy RFB sessions to [VncView] and native PRoot X11 sessions
+ * to the embedded Lorie SurfaceView activity.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DisplayScreen(
-    vncPort: Int?,
+    displayEndpoint: DisplayEndpoint?,
     /** Null in the two-pane layout, where the menu stays visible beside us. */
     onBack: (() -> Unit)?,
     onOpenInNewWindow: (() -> Unit)? = null,
+) {
+    when (displayEndpoint) {
+        is DisplayEndpoint.Rfb -> RfbDisplayScreen(
+            vncPort = displayEndpoint.port,
+            onBack = onBack,
+            onOpenInNewWindow = onOpenInNewWindow,
+        )
+        is DisplayEndpoint.NativeX11 -> NativeX11DisplayScreen(onBack)
+        null -> NoGraphicalDisplayScreen(onBack)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RfbDisplayScreen(
+    vncPort: Int,
+    onBack: (() -> Unit)?,
+    onOpenInNewWindow: (() -> Unit)?,
 ) {
     var statusText by remember { mutableStateOf("Connecting…") }
     var vncView by remember { mutableStateOf<VncView?>(null) }
@@ -113,15 +134,6 @@ fun DisplayScreen(
             )
         },
     ) { padding ->
-        if (vncPort == null) {
-            Text(
-                "This session has no graphical display.",
-                color = Color.White,
-                modifier = Modifier.padding(24.dp),
-            )
-            return@Scaffold
-        }
-
         Box(
             Modifier
                 .fillMaxSize()
@@ -149,6 +161,87 @@ fun DisplayScreen(
                 WaitingForGuestDisplay()
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NativeX11DisplayScreen(onBack: (() -> Unit)?) {
+    val context = LocalContext.current
+    var launchError by remember { mutableStateOf<String?>(null) }
+    val openDisplay = {
+        launchError = runCatching {
+            context.startActivity(
+                Intent(context, com.termux.x11.MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.exceptionOrNull()?.message
+    }
+    LaunchedEffect(Unit) { openDisplay() }
+
+    Scaffold(
+        containerColor = Color.Black,
+        topBar = {
+            TopAppBar(
+                title = { Text("Native X11 display") },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Black,
+                    titleContentColor = Color.White,
+                    navigationIconContentColor = Color.White,
+                ),
+            )
+        },
+    ) { padding ->
+        Column(
+            modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                launchError ?: "The PRoot desktop is open in its native X11 window.",
+                color = Color.White,
+            )
+            Button(onClick = openDisplay, modifier = Modifier.padding(top = 16.dp)) {
+                Text("Open X11 display")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NoGraphicalDisplayScreen(onBack: (() -> Unit)?) {
+    Scaffold(
+        containerColor = Color.Black,
+        topBar = {
+            TopAppBar(
+                title = { Text("Display") },
+                navigationIcon = {
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Black,
+                    titleContentColor = Color.White,
+                    navigationIconContentColor = Color.White,
+                ),
+            )
+        },
+    ) { padding ->
+        Text(
+            "This session has no graphical display.",
+            color = Color.White,
+            modifier = Modifier.padding(padding).padding(24.dp),
+        )
     }
 }
 

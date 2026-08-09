@@ -5,6 +5,7 @@ import com.crunzex.linuxondex.about.AboutRepository
 import com.crunzex.linuxondex.about.UpdateNotice
 import com.crunzex.linuxondex.capability.CapabilityProbe
 import com.crunzex.linuxondex.core.DiagnosticsLogExporter
+import com.crunzex.linuxondex.engine.proot.AppManagedNativeX11Server
 import com.crunzex.linuxondex.engine.qemu.QemuVmEngine
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
@@ -37,6 +38,8 @@ class AppContainer(context: Context) {
     }
 
     val payloadInstaller: PayloadInstaller by lazy { PayloadInstaller(appContext, vmPaths) }
+
+    val nativeX11Server by lazy { AppManagedNativeX11Server(appContext, vmPaths) }
 
     val diskImageManager: DiskImageManager by lazy { DiskImageManager(vmPaths) }
 
@@ -72,6 +75,7 @@ class AppContainer(context: Context) {
             capabilityProbe = capabilityProbe,
             paths = vmPaths,
             payloadInstaller = payloadInstaller,
+            nativeX11Server = nativeX11Server,
             diskManager = diskImageManager,
             repository = vmRepository,
             preparedImages = preparedImageRepository,

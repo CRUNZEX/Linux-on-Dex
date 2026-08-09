@@ -30,15 +30,36 @@ class RootfsImageInstaller(private val paths: VmPaths) {
         archiveFile: File,
         onProgressPercent: (Int) -> Unit = {},
     ): File {
-        if (!archiveFile.exists()) {
-            throw LxdError.StorageFailed("rootfs archive is missing: ${archiveFile.name}")
-        }
         val rootfsDir = paths.prootRootfsDirFor(archiveFile.name)
         val stampFile = rootfsDir.resolve(STAMP_FILE_NAME)
+        val installedStamp = stampFile.takeIf(File::isFile)?.readText()
+        val reclaimedArchive = readReclaimedArchive(archiveFile)
+
+        if (reclaimedArchive != null) {
+            if (installedStamp != reclaimedArchive.stamp) {
+                throw LxdError.PayloadCorrupted(
+                    "the storage-saving rootfs marker has no matching extracted image; " +
+                        "import the original ${archiveFile.name} again"
+                )
+            }
+            deleteRetainedArchiveCopy(archiveFile)
+            AppLog.debug(SCOPE, "rootfs already extracted (archive reclaimed): ${rootfsDir.name}")
+            return rootfsDir
+        }
+        if (!archiveFile.exists()) {
+            if (installedStamp != null && rootfsDir.isDirectory) {
+                deleteRetainedArchiveCopy(archiveFile)
+                AppLog.warn(SCOPE, "using extracted rootfs after its imported archive was removed")
+                return rootfsDir
+            }
+            throw LxdError.StorageFailed("rootfs archive is missing: ${archiveFile.name}")
+        }
+
         val expectedStamp = stampValueFor(archiveFile)
 
-        if (stampFile.takeIf(File::exists)?.readText() == expectedStamp) {
+        if (installedStamp == expectedStamp) {
             AppLog.debug(SCOPE, "rootfs already extracted (stamp match): ${rootfsDir.name}")
+            reclaimImportedArchive(archiveFile, expectedStamp)
             return rootfsDir
         }
 
@@ -47,19 +68,83 @@ class RootfsImageInstaller(private val paths: VmPaths) {
         extractInto(archiveFile, rootfsDir, onProgressPercent)
         writeDefaultDnsConfig(rootfsDir)
         stampFile.writeText(expectedStamp)
+        reclaimImportedArchive(archiveFile, expectedStamp)
         return rootfsDir
     }
 
     /** True when [archiveFile] has a finished extraction (fast start). */
     fun isExtracted(archiveFile: File): Boolean {
         val stampFile = paths.prootRootfsDirFor(archiveFile.name).resolve(STAMP_FILE_NAME)
-        return stampFile.takeIf(File::exists)?.readText() == stampValueFor(archiveFile)
+        val installedStamp = stampFile.takeIf(File::isFile)?.readText() ?: return false
+        val reclaimedArchive = readReclaimedArchive(archiveFile)
+        return when {
+            reclaimedArchive != null -> installedStamp == reclaimedArchive.stamp
+            archiveFile.isFile -> installedStamp == stampValueFor(archiveFile)
+            else -> true
+        }
     }
 
     /** Removes the extracted tree, e.g. when its archive is deleted. */
     fun deleteExtraction(archiveFile: File) {
         discardPreviousExtraction(paths.prootRootfsDirFor(archiveFile.name))
+        deleteRetainedArchiveCopy(archiveFile)
     }
+
+    /**
+     * Replaces only the app-managed imported archive with a tiny descriptor
+     * after extraction. The original document selected by the user is never
+     * touched, while the redundant app copy no longer consumes another GB.
+     */
+    private fun reclaimImportedArchive(archiveFile: File, stamp: String) {
+        try {
+            if (!isAppManagedArchive(archiveFile) || !archiveFile.isFile) return
+            if (readReclaimedArchive(archiveFile) != null) return
+
+            val sourceSizeBytes = archiveFile.length()
+            val descriptorFile = descriptorTemporaryFile(archiveFile)
+            val retainedArchive = retainedArchiveFile(archiveFile)
+            descriptorFile.delete()
+            retainedArchive.delete()
+            descriptorFile.writeText(reclaimedArchiveText(stamp, sourceSizeBytes))
+
+            if (!archiveFile.renameTo(retainedArchive)) {
+                descriptorFile.delete()
+                AppLog.warn(SCOPE, "could not reclaim imported archive ${archiveFile.name}")
+                return
+            }
+            if (!descriptorFile.renameTo(archiveFile)) {
+                retainedArchive.renameTo(archiveFile)
+                descriptorFile.delete()
+                AppLog.warn(SCOPE, "could not publish reclaimed rootfs marker ${archiveFile.name}")
+                return
+            }
+
+            if (retainedArchive.delete()) {
+                AppLog.info(
+                    SCOPE,
+                    "reclaimed ${sourceSizeBytes shr 20} MiB after rootfs extraction",
+                )
+            } else {
+                AppLog.warn(SCOPE, "rootfs is ready but the redundant archive could not be removed")
+            }
+        } catch (error: Exception) {
+            AppLog.warn(SCOPE, "could not reclaim imported archive ${archiveFile.name}", error)
+        }
+    }
+
+    private fun deleteRetainedArchiveCopy(archiveFile: File) {
+        if (!isAppManagedArchive(archiveFile)) return
+        val retainedArchive = retainedArchiveFile(archiveFile)
+        if (retainedArchive.exists() && !retainedArchive.delete()) {
+            AppLog.warn(SCOPE, "could not remove retained archive ${retainedArchive.name}")
+        }
+        descriptorTemporaryFile(archiveFile).delete()
+    }
+
+    private fun isAppManagedArchive(archiveFile: File): Boolean = runCatching {
+        val imageDirectory = paths.vmImagesDir?.canonicalFile ?: return@runCatching false
+        archiveFile.canonicalFile.parentFile == imageDirectory
+    }.getOrDefault(false)
 
     private fun extractInto(
         archiveFile: File,
@@ -107,12 +192,14 @@ class RootfsImageInstaller(private val paths: VmPaths) {
      * conservative because "no space left" halfway through wastes minutes.
      */
     private fun requireFreeSpaceFor(archiveFile: File) {
-        val requiredBytes = archiveFile.length() * EXTRACTED_SIZE_FACTOR
+        val requiredBytes = archiveFile.length() * EXTRACTED_SIZE_FACTOR +
+            ANDROID_STORAGE_RESERVE_BYTES
         val freeBytes = paths.prootImagesDir.apply { mkdirs() }.usableSpace
         if (freeBytes < requiredBytes) {
             throw LxdError.StorageFailed(
                 "extracting ${archiveFile.name} needs about ${requiredBytes shr 30} GB free " +
-                    "on internal storage but only ${freeBytes shr 30} GB is available"
+                    "on internal storage, including Android's safety reserve, but only " +
+                    "${freeBytes shr 30} GB is available"
             )
         }
     }
@@ -165,10 +252,57 @@ class RootfsImageInstaller(private val paths: VmPaths) {
         private const val FILE_BUFFER_BYTES = 1 shl 18
         private const val GZIP_BUFFER_BYTES = 1 shl 16
         private const val EXTRACTED_SIZE_FACTOR = 4L
+        private const val ANDROID_STORAGE_RESERVE_BYTES = 2L * 1024 * 1024 * 1024
+        private const val RECLAIMED_ARCHIVE_MAGIC = "linux-on-dex-reclaimed-rootfs-v1"
+        private const val MAX_RECLAIMED_DESCRIPTOR_BYTES = 4L * 1024
+        private const val RETAINED_ARCHIVE_SUFFIX = ".compressed-reclaim"
+        private const val DESCRIPTOR_TEMPORARY_SUFFIX = ".descriptor.part"
+
+        data class ReclaimedArchive(
+            val stamp: String,
+            val sourceSizeBytes: Long,
+        )
 
         /** What proves a tree came from exactly this archive file. */
         fun stampValueFor(archiveFile: File): String =
-            stampValue(archiveFile.name, archiveFile.length(), archiveFile.lastModified())
+            readReclaimedArchive(archiveFile)?.stamp
+                ?: stampValue(archiveFile.name, archiveFile.length(), archiveFile.lastModified())
+
+        /** Original compressed size, even after the app copy was reclaimed. */
+        fun sourceSizeBytes(archiveFile: File): Long =
+            readReclaimedArchive(archiveFile)?.sourceSizeBytes ?: archiveFile.length()
+
+        fun isReclaimedArchive(archiveFile: File): Boolean =
+            readReclaimedArchive(archiveFile) != null
+
+        internal fun reclaimedArchiveText(stamp: String, sourceSizeBytes: Long): String =
+            "$RECLAIMED_ARCHIVE_MAGIC\n$sourceSizeBytes\n$stamp\n"
+
+        internal fun readReclaimedArchive(archiveFile: File): ReclaimedArchive? {
+            if (!archiveFile.isFile || archiveFile.length() > MAX_RECLAIMED_DESCRIPTOR_BYTES) {
+                return null
+            }
+            return runCatching {
+                val lines = archiveFile.readLines()
+                if (lines.size < 3 || lines[0] != RECLAIMED_ARCHIVE_MAGIC) {
+                    null
+                } else {
+                    val sourceSizeBytes = lines[1].toLongOrNull()?.takeIf { it > 0 }
+                    val stamp = lines[2].takeIf(String::isNotBlank)
+                    if (sourceSizeBytes != null && stamp != null) {
+                        ReclaimedArchive(stamp, sourceSizeBytes)
+                    } else {
+                        null
+                    }
+                }
+            }.getOrNull()
+        }
+
+        private fun retainedArchiveFile(archiveFile: File): File =
+            File(archiveFile.parentFile, ".${archiveFile.name}$RETAINED_ARCHIVE_SUFFIX")
+
+        private fun descriptorTemporaryFile(archiveFile: File): File =
+            File(archiveFile.parentFile, ".${archiveFile.name}$DESCRIPTOR_TEMPORARY_SUFFIX")
 
         /** Pure form for tests: name, size and mtime identify an archive. */
         fun stampValue(name: String, sizeBytes: Long, modifiedAtMillis: Long): String =

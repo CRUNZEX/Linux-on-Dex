@@ -124,7 +124,7 @@ private fun CapabilitiesGroup(uiState: MainUiState) {
 
 /**
  * Where the phone's GPU is and is not in play — stated plainly so "make it
- * use the GPU" has a truthful answer. App-side drawing (VNC surface,
+ * use the GPU" has a truthful answer. App-side drawing (RFB or X11 surface,
  * terminal glyphs) runs on the device GPU through hardware-accelerated
  * canvases. PRoot 3D uses a separately verified virgl bridge into Android
  * EGL/Vulkan; a failed vendor backend is contained and falls back to llvmpipe.

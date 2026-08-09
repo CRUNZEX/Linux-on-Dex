@@ -4,13 +4,18 @@ import com.crunzex.linuxondex.engine.runtime.NativeCommand
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import java.io.File
 
+enum class ProotDisplayBackend {
+    NATIVE_X11,
+    LEGACY_VNC,
+}
+
 /**
  * Builds the exact PRoot command lines the engine runs. Pure construction —
  * no process is spawned here — so every argument choice is unit-testable.
  *
  * Three shapes exist:
  *  - the desktop session: the long-lived supervisor inside a rootfs image
- *    that publishes VNC and owns the graphical session,
+ *    that owns either a native X11 or legacy VNC graphical session,
  *  - an interactive shell into that same rootfs, one per terminal window,
  *  - the legacy bundled-Alpine shell (the no-image fallback).
  */
@@ -24,6 +29,7 @@ object ProotCommandFactory {
         vncPort: Int,
         sharedFolderDir: File?,
         graphicsBridgeEnabled: Boolean = false,
+        displayBackend: ProotDisplayBackend = ProotDisplayBackend.LEGACY_VNC,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
         arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
@@ -34,8 +40,12 @@ object ProotCommandFactory {
             selectVirglDriver = false,
         ) + mapOf(
             "DEX_RESOLUTION" to displayResolution,
-            "DEX_VNC_PORT" to vncPort.toString(),
-        ),
+            "DEX_DISPLAY_BACKEND" to displayBackend.name.lowercase(),
+        ) + if (displayBackend == ProotDisplayBackend.LEGACY_VNC) {
+            mapOf("DEX_VNC_PORT" to vncPort.toString())
+        } else {
+            mapOf("DISPLAY" to NATIVE_X11_DISPLAY)
+        },
         workingDirectory = paths.vmRootDir,
     )
 
@@ -230,6 +240,8 @@ object ProotCommandFactory {
     const val CONSOLE_SESSION_GUEST_PATH = "/usr/local/bin/dex-session"
     const val SHARED_FOLDER_GUEST_PATH = "/root/shared"
     const val VIRGL_SOCKET_GUEST_PATH = "/tmp/.virgl_test"
+    const val NATIVE_X11_DISPLAY_NUMBER = 1
+    const val NATIVE_X11_DISPLAY = ":$NATIVE_X11_DISPLAY_NUMBER"
 
     /** Names Android supplementary groups before bash or `groups` can warn. */
     const val INTERACTIVE_LOGIN_COMMAND =

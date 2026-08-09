@@ -953,8 +953,8 @@ private fun DisplayGroup(
         }
         RowDivider()
         ListRow(
-            title = "VNC display number",
-            subtitle = "Guest screen served on 127.0.0.1:${config.vncPort}",
+            title = "QEMU RFB display number",
+            subtitle = "QEMU/VNC fallback listens on 127.0.0.1:${config.vncPort}",
             value = config.display.vncDisplayNumber.toString(),
         )
     }

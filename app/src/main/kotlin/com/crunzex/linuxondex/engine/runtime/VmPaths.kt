@@ -41,6 +41,7 @@ class VmPaths(
     val prootBinary: File = nativeLibraryDir.resolve("libproot.so")
     val prootLoaderBinary: File = nativeLibraryDir.resolve("libproot-loader.so")
     val virglRendererBinary: File = nativeLibraryDir.resolve("libvirgl-test-server-android.so")
+    val x11RendererLibrary: File = nativeLibraryDir.resolve("libXlorie.so")
 
     val vmRootDir: File = filesDir.resolve("vm")
     val qemuDataDir: File = vmRootDir.resolve("qemu")
@@ -116,6 +117,12 @@ class VmPaths(
         ).forEach { directory -> directory.mkdirs() }
         sharedFolderDir?.mkdirs()
         vmImagesDir?.mkdirs()
+    }
+
+    /** Removes session-only process files after every guest has stopped. */
+    fun resetTransientRuntimeDirectory(): Boolean {
+        if (tmpDir.exists() && !tmpDir.deleteRecursively()) return false
+        return tmpDir.mkdirs() || tmpDir.isDirectory
     }
 
     /**

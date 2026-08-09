@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build a lightweight GNOME-like Ubuntu desktop for Linux on DeX.
 
-GNOME Shell composites every frame and is too expensive over a phone-local VNC
-display. This image uses XFCE components with a GNOME-like top bar and dock,
+GNOME Shell composites every frame and is expensive on a phone display. This
+image uses XFCE components with a GNOME-like top bar and dock,
 but deliberately omits the compositor, desktop manager, animations, and stock
 session helpers. OpenGL applications still use the app's Android virgl bridge.
 VS Code and Firefox are preinstalled. The artifact is a normal
@@ -28,7 +28,7 @@ from pathlib import Path
 
 
 UBUNTU_BASE_DIGEST = "sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90"
-RELEASE_VERSION = "1.1.13"
+RELEASE_VERSION = "1.3.0-beta2"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = (
@@ -48,7 +48,8 @@ REQUIRED_PATHS = (
     "usr/bin/xfce4-panel",
     "usr/bin/xfsettingsd",
     "usr/bin/xfwm4",
-    "usr/bin/Xtigervnc",
+    "usr/bin/xkbcomp",
+    "usr/local/share/linux-on-dex/display-backend",
     "usr/sbin/sshd",
     "usr/bin/xdotool",
 )
@@ -98,7 +99,7 @@ def render_dockerfile() -> str:
         RUN apt-get update && apt-get install -y --no-install-recommends \\
               bash coreutils procps util-linux dbus dbus-x11 \\
               xfwm4 xfce4-panel xfce4-settings \\
-              thunar xfce4-terminal tigervnc-standalone-server x11-xserver-utils \\
+              thunar xfce4-terminal xkb-data x11-xserver-utils \\
               x11-utils xdotool \\
               openssh-server openssh-client git curl ca-certificates gnupg \\
               mesa-utils fonts-ubuntu fonts-dejavu-core adwaita-icon-theme \\
@@ -154,6 +155,8 @@ def render_dockerfile() -> str:
             && mkdir -p /run/sshd /run/linux-on-dex /root/shared /var/log/apt \\
               /var/cache/apt/archives/partial /var/lib/apt/lists/partial \\
               /var/lib/dpkg/updates /var/lib/dpkg/info \\
+              /usr/local/share/linux-on-dex \\
+            && printf 'native-x11\\n' > /usr/local/share/linux-on-dex/display-backend \\
             && printf 'root:linuxondex\\n' | chpasswd \\
             && printf 'Linux on DeX {RELEASE_VERSION} Ubuntu 24.04 GNOME-like XFCE\\n' \\
               > /etc/linux-on-dex-release \\
@@ -258,8 +261,6 @@ DESKTOP_SUPERVISOR = r"""#!/bin/sh
 set -u
 
 resolution="${DEX_RESOLUTION:-1280x800}"
-vnc_port="${DEX_VNC_PORT:-5901}"
-max_frame_rate=240
 
 log() { printf '[dex-xfce] %s\n' "$*"; }
 
@@ -280,7 +281,7 @@ export NO_AT_BRIDGE=1 GTK_A11Y=none GVFS_DISABLE_FUSE=1
 mkdir -p "$XDG_RUNTIME_DIR" /run/dbus /run/sshd /tmp/.X11-unix /var/lib/dbus
 chmod 700 "$XDG_RUNTIME_DIR"
 chmod 1777 /tmp /tmp/.X11-unix
-rm -f /run/dbus/pid /tmp/.X1-lock /tmp/.X11-unix/X1
+rm -f /run/dbus/pid
 
 dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true
 dbus-uuidgen --ensure 2>/dev/null || true
@@ -288,19 +289,13 @@ dbus-uuidgen --ensure 2>/dev/null || true
 dbus-daemon --system --fork 2>/dev/null || log 'system D-Bus unavailable'
 /usr/sbin/sshd 2>/dev/null || log 'sshd unavailable'
 
-log "starting Xvnc at ${resolution}, port ${vnc_port}"
-Xtigervnc :1 -geometry "$resolution" -depth 24 -rfbport "$vnc_port" \
-    -localhost -SecurityTypes None -AlwaysShared -FrameRate "$max_frame_rate" \
-    -desktop 'Linux on DeX GNOME-like desktop' &
-xvnc_pid=$!
-
 attempt=0
 while [ ! -S /tmp/.X11-unix/X1 ]; do
     attempt=$((attempt + 1))
-    [ "$attempt" -le 100 ] || { log 'Xvnc socket timeout'; exit 1; }
-    kill -0 "$xvnc_pid" 2>/dev/null || { log 'Xvnc exited early'; exit 1; }
+    [ "$attempt" -le 100 ] || { log 'native X11 socket timeout'; exit 1; }
     sleep 0.1
 done
+log "native X11 ready at $DISPLAY (${resolution} requested)"
 
 session_pid=''
 
@@ -310,23 +305,21 @@ stop_children() {
         wait "$session_pid" 2>/dev/null || true
         session_pid=''
     fi
-    kill "$xvnc_pid" 2>/dev/null || true
-    wait "$xvnc_pid" 2>/dev/null || true
 }
 
 handle_shutdown() {
-    log 'shutdown requested; stopping desktop and Xvnc'
+    log 'shutdown requested; stopping desktop'
     stop_children
     exit 0
 }
 
 trap handle_shutdown HUP INT TERM
 
-# Xvnc remains the session leader. A panel or window-manager failure restarts
-# only the lightweight desktop while VNC, SSH, and terminal connections stay
+# Native X11 remains the display. A panel or window-manager failure restarts
+# only the lightweight desktop while X11, SSH, and terminal connections stay
 # alive.
 restart_attempt=0
-while kill -0 "$xvnc_pid" 2>/dev/null; do
+while [ -S /tmp/.X11-unix/X1 ]; do
     started_at=$(date +%s)
     log 'starting GNOME-like XFCE session (compositor and animations disabled)'
     dbus-run-session -- /usr/local/bin/dex-xfce-session &
@@ -335,8 +328,8 @@ while kill -0 "$xvnc_pid" 2>/dev/null; do
     session_exit_code=$?
     session_pid=''
 
-    if ! kill -0 "$xvnc_pid" 2>/dev/null; then
-        log 'Xvnc exited while the desktop was running'
+    if [ ! -S /tmp/.X11-unix/X1 ]; then
+        log 'native X11 stopped while the desktop was running'
         exit 1
     fi
     runtime=$(( $(date +%s) - started_at ))
@@ -347,7 +340,7 @@ while kill -0 "$xvnc_pid" 2>/dev/null; do
     sleep "$restart_delay"
 done
 
-log 'Xvnc stopped unexpectedly'
+log 'native X11 stopped unexpectedly'
 exit 1
 """
 

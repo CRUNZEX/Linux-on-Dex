@@ -275,7 +275,7 @@ private fun DestinationPane(
         Destination.DISPLAY -> {
             val context = LocalContext.current
             DisplayScreen(
-                vncPort = (uiState.vmState as? VmState.Running)?.vncPort,
+                displayEndpoint = (uiState.vmState as? VmState.Running)?.displayEndpoint,
                 onBack = onBack,
                 onOpenInNewWindow = {
                     context.startActivity(DisplayActivity.launchIntent(context))

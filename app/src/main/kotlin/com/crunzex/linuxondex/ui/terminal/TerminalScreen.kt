@@ -1,5 +1,6 @@
 package com.crunzex.linuxondex.ui.terminal
 
+import android.content.ClipData
 import android.view.KeyEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -12,11 +13,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -31,12 +32,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -44,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.crunzex.linuxondex.terminal.TerminalSession
+import kotlinx.coroutines.launch
 
 /**
  * Full terminal over the guest serial console: a real emulator surface, a
@@ -62,7 +66,9 @@ fun TerminalScreen(
 ) {
     val status by session.statusLine.collectAsStateWithLifecycle()
     val guestTitle by session.title.collectAsStateWithLifecycle()
-    val clipboard = LocalClipboardManager.current
+    val clipboard = LocalClipboard.current
+    val context = LocalContext.current
+    val clipboardScope = rememberCoroutineScope()
 
     var fontSizeSp by rememberSaveable { mutableFloatStateOf(TerminalCanvasView.DEFAULT_FONT_SIZE_SP) }
     var ctrlLatched by remember { mutableStateOf(false) }
@@ -106,18 +112,37 @@ fun TerminalScreen(
                         )
                     }
                     IconButton(onClick = {
-                        clipboard.setText(AnnotatedString(session.screen.screenText()))
+                        clipboardScope.launch {
+                            clipboard.setClipEntry(
+                                ClipEntry(
+                                    ClipData.newPlainText(
+                                        "Terminal screen",
+                                        session.screen.screenText(),
+                                    )
+                                )
+                            )
+                        }
                     }) {
                         Icon(Icons.Filled.ContentCopy, contentDescription = "Copy screen text")
                     }
                     IconButton(onClick = {
-                        clipboard.getText()?.text?.let(session::paste)
+                        clipboardScope.launch {
+                            clipboard.getClipEntry()?.clipData
+                                ?.takeIf { it.itemCount > 0 }
+                                ?.getItemAt(0)
+                                ?.coerceToText(context)
+                                ?.toString()
+                                ?.let(session::paste)
+                        }
                     }) {
                         Icon(Icons.Filled.ContentPaste, contentDescription = "Paste")
                     }
                     if (onOpenInNewWindow != null) {
                         IconButton(onClick = onOpenInNewWindow) {
-                            Icon(Icons.Filled.OpenInNew, contentDescription = "Open in new window")
+                            Icon(
+                                Icons.AutoMirrored.Filled.OpenInNew,
+                                contentDescription = "Open in new window",
+                            )
                         }
                     }
                 },

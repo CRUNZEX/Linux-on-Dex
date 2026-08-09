@@ -60,6 +60,23 @@ class ProotCommandFactoryTest {
 
         assertEquals("1280x800", environment["DEX_RESOLUTION"])
         assertEquals("5901", environment["DEX_VNC_PORT"])
+        assertEquals("legacy_vnc", environment["DEX_DISPLAY_BACKEND"])
+    }
+
+    @Test
+    fun `native X11 desktop publishes only the Unix display contract`() {
+        val desktop = ProotCommandFactory.desktopSession(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            displayResolution = "1280x800",
+            vncPort = 5901,
+            sharedFolderDir = null,
+            displayBackend = ProotDisplayBackend.NATIVE_X11,
+        )
+
+        assertEquals(":1", desktop.environment["DISPLAY"])
+        assertEquals("native_x11", desktop.environment["DEX_DISPLAY_BACKEND"])
+        assertNull(desktop.environment["DEX_VNC_PORT"])
     }
 
     @Test

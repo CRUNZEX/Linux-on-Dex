@@ -495,7 +495,7 @@ class MainViewModel(private val container: AppContainer) : ViewModel() {
             ),
             // Resolution is the strongest FPS lever there is: with no GPU
             // for the guest, every pixel is drawn by the emulated CPU and
-            // then shipped over VNC, so cost scales linearly with pixel
+            // then presented through its display transport, so cost scales with pixel
             // count. 1024×600 is 40% fewer pixels than 1280×800 and less
             // than a third of 1080p. Raise it in Display settings once the
             // desktop feels comfortable.

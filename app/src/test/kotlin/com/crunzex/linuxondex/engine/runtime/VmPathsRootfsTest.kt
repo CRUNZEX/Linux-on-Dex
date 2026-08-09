@@ -1,6 +1,7 @@
 package com.crunzex.linuxondex.engine.runtime
 
 import java.io.File
+import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,5 +70,27 @@ class VmPathsRootfsTest {
         assertTrue(
             paths.prootImagesDir.absolutePath.startsWith(paths.vmRootDir.absolutePath)
         )
+    }
+
+    @Test
+    fun `resetting transient runtime storage removes stale cache files`() {
+        val directory = Files.createTempDirectory("vm-paths-test").toFile()
+        val localPaths = VmPaths(
+            nativeLibraryDir = directory.resolve("lib"),
+            filesDir = directory.resolve("files"),
+            cacheDir = directory.resolve("cache"),
+            externalFilesDir = { null },
+        )
+        try {
+            val staleFile = localPaths.tmpDir.resolve("stale/process.pid")
+            staleFile.parentFile?.mkdirs()
+            staleFile.writeText("123")
+
+            assertTrue(localPaths.resetTransientRuntimeDirectory())
+            assertTrue(localPaths.tmpDir.isDirectory)
+            assertTrue(localPaths.tmpDir.listFiles().orEmpty().isEmpty())
+        } finally {
+            directory.deleteRecursively()
+        }
     }
 }

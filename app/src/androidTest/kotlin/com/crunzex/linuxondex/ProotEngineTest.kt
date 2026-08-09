@@ -9,6 +9,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import com.crunzex.linuxondex.engine.proot.ProotEngine
+import com.crunzex.linuxondex.engine.proot.AppManagedNativeX11Server
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.vm.CpuConfig
@@ -31,7 +32,11 @@ class ProotEngineTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val paths = VmPaths(context)
         paths.createRuntimeDirectories()
-        engine = ProotEngine(paths, PayloadInstaller(context, paths))
+        engine = ProotEngine(
+            paths,
+            PayloadInstaller(context, paths),
+            AppManagedNativeX11Server(context, paths),
+        )
     }
 
     @Test

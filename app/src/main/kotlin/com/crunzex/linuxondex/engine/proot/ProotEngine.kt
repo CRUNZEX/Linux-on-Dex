@@ -21,6 +21,7 @@ import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.vm.PreparedImageConfig
 import com.crunzex.linuxondex.vm.PreparedImageFormat
 import com.crunzex.linuxondex.vm.ScreenResolution
+import com.crunzex.linuxondex.vm.DisplayEndpoint
 import com.crunzex.linuxondex.vm.StopReason
 import com.crunzex.linuxondex.vm.VmConfig
 import com.crunzex.linuxondex.vm.VmState
@@ -40,10 +41,9 @@ import kotlin.time.Duration
  * Two modes, decided by the selected image:
  *
  *  - **Desktop rootfs image** (`*.rootfs.tar.gz`): the archive is extracted
- *    once, then its baked `dex-desktop` supervisor starts an Xvnc + GNOME
- *    session. The engine reports the VNC port, so the same Display screen
- *    (and its FPS counter) used for QEMU guests just works. Terminal windows
- *    each get their own login shell into the rootfs.
+ *    once, then its baked `dex-desktop` supervisor starts a desktop against
+ *    the embedded native X server. Older images keep their Xvnc/RFB path.
+ *    Terminal windows each get their own login shell into the rootfs.
  *
  *  - **Bundled Alpine fallback** (no image selected): the historical
  *    terminal-only shell session, unchanged.
@@ -51,6 +51,7 @@ import kotlin.time.Duration
 class ProotEngine(
     private val paths: VmPaths,
     private val payloadInstaller: PayloadInstaller,
+    private val nativeX11Server: NativeX11Server,
     private val rootfsInstaller: RootfsImageInstaller = RootfsImageInstaller(paths),
     private val reaper: GuestProcessReaper = GuestProcessReaper(paths),
     private val graphicsBridge: AndroidVirglBridge = AndroidVirglBridge(paths),
@@ -185,9 +186,13 @@ class ProotEngine(
     private fun startDesktopSessionLocked(config: VmConfig, rootfsDir: File) {
         prepareSharedMemoryDir()
         graphicsBridgeEnabled = startVerifiedGraphicsBridge(rootfsDir)
+        val displayBackend = displayBackendFor(rootfsDir)
 
         _state.value = VmState.Starting(kind)
         desktopLogFile().delete() // fresh log per boot, like the QEMU engine
+        if (displayBackend == ProotDisplayBackend.NATIVE_X11) {
+            startNativeXServer(rootfsDir)
+        }
         val command = ProotCommandFactory.desktopSession(
             paths = paths,
             rootfsDir = rootfsDir,
@@ -195,6 +200,7 @@ class ProotEngine(
             vncPort = config.vncPort,
             sharedFolderDir = paths.sharedFolderDir?.also { it.mkdirs() },
             graphicsBridgeEnabled = graphicsBridgeEnabled,
+            displayBackend = displayBackend,
         )
         val process = command.start(redirectErrorStream = true)
         sessionProcess = process
@@ -202,13 +208,75 @@ class ProotEngine(
         pumpOutputToLog(process, desktopLogFile())
         watchSessionExit(process, isDesktopSession = true)
 
-        waitForVncServer(process, config.vncPort)
+        val displayEndpoint = when (displayBackend) {
+            ProotDisplayBackend.NATIVE_X11 -> {
+                waitForNativeXServer(process, rootfsDir)
+                DisplayEndpoint.NativeX11(ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER)
+            }
+            ProotDisplayBackend.LEGACY_VNC -> {
+                waitForVncServer(process, config.vncPort)
+                DisplayEndpoint.Rfb(config.vncPort)
+            }
+        }
         _state.value = VmState.Running(
             engine = kind,
-            vncPort = config.vncPort,
+            vncPort = (displayEndpoint as? DisplayEndpoint.Rfb)?.port,
             startedAtMillis = System.currentTimeMillis(),
+            displayEndpoint = displayEndpoint,
         )
-        AppLog.info(SCOPE, "desktop session up on VNC port ${config.vncPort}")
+        AppLog.info(SCOPE, "desktop session ready via $displayBackend")
+    }
+
+    private fun displayBackendFor(rootfsDir: File): ProotDisplayBackend {
+        val marker = rootfsDir.resolve(DISPLAY_BACKEND_MARKER_RELATIVE_PATH)
+        return if (marker.isFile && marker.readText().trim() == NATIVE_X11_MARKER) {
+            ProotDisplayBackend.NATIVE_X11
+        } else {
+            ProotDisplayBackend.LEGACY_VNC
+        }
+    }
+
+    private fun startNativeXServer(rootfsDir: File) {
+        if (!paths.x11RendererLibrary.isFile) {
+            throw LxdError.PayloadMissing(paths.x11RendererLibrary.name)
+        }
+        val xkbRoot = rootfsDir.resolve(XKB_CONFIG_ROOT_RELATIVE_PATH)
+        if (!xkbRoot.isDirectory) {
+            throw LxdError.BootFailed("the rootfs is missing XKB data at /usr/share/X11/xkb")
+        }
+        val rootfsTmp = rootfsDir.resolve("tmp").apply { mkdirs() }
+        rootfsTmp.resolve(".X11-unix").apply { mkdirs() }
+            .resolve("X${ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER}").delete()
+        rootfsTmp.resolve(".X${ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER}-lock").delete()
+        nativeX11Server.start(
+            rootfsDir = rootfsDir,
+            displayNumber = ProotCommandFactory.NATIVE_X11_DISPLAY_NUMBER,
+        )
+    }
+
+    private fun waitForNativeXServer(sessionProcess: Process, rootfsDir: File) {
+        val socket = rootfsDir.resolve(NATIVE_X11_SOCKET_RELATIVE_PATH)
+        val deadline = System.currentTimeMillis() + DESKTOP_STARTUP_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            if (!sessionProcess.isAlive) {
+                throw LxdError.BootFailed(
+                    "the desktop session ended during startup " +
+                        "(exit ${sessionProcess.waitFor()}): ${readLogTail(desktopLogFile())}"
+                )
+            }
+            if (!nativeX11Server.isAlive()) {
+                throw LxdError.BootFailed(
+                    "the app-managed native X11 process stopped during startup: " +
+                        nativeX11Server.diagnosticStatus()
+                )
+            }
+            if (socket.exists()) return
+            Thread.sleep(DISPLAY_POLL_INTERVAL_MS)
+        }
+        throw LxdError.BootFailed(
+            "the native X server did not publish $NATIVE_X11_SOCKET_RELATIVE_PATH within " +
+                "${DESKTOP_STARTUP_TIMEOUT_MS / 1000}s: ${nativeX11Server.diagnosticStatus()}"
+        )
     }
 
     /**
@@ -289,7 +357,7 @@ class ProotEngine(
                 )
             }
             if (canConnectTo(vncPort)) return
-            Thread.sleep(VNC_POLL_INTERVAL_MS)
+            Thread.sleep(DISPLAY_POLL_INTERVAL_MS)
         }
         throw LxdError.BootFailed(
             "the desktop did not publish its display within " +
@@ -395,11 +463,10 @@ class ProotEngine(
     /**
      * Ends the whole guest, not just the process the app started.
      *
-     * PRoot traces its guest rather than owning it, so its X server, session
-     * bus and desktop survive its death as orphans — still holding the VNC
-     * port, which made the next start fail on an address already in use with
-     * nothing visibly running. The tree is enumerated and killed explicitly,
-     * then a final sweep catches anything a previous run left behind.
+     * PRoot traces its guest rather than owning it, so its session bus and
+     * desktop can survive as orphans and interfere with the next start. The
+     * tree is enumerated and killed explicitly, then a final sweep catches
+     * anything a previous run left behind.
      */
     private fun endEveryGuestProcess(process: Process) {
         process.destroyForcibly()
@@ -439,6 +506,7 @@ class ProotEngine(
 
     private fun cleanupProcesses() {
         closeConsoleShells()
+        nativeX11Server.stop()
         graphicsBridge.stop()
         graphicsBridgeEnabled = false
         sessionProcess = null
@@ -516,14 +584,18 @@ class ProotEngine(
     private fun desktopLogFile(): File = paths.logsDir.resolve(DESKTOP_LOG_FILE_NAME)
 
     /** Supervisor stdout+stderr → log file; it is the boot log on failure. */
-    private fun pumpOutputToLog(process: Process, logFile: File) {
+    private fun pumpOutputToLog(
+        process: Process,
+        logFile: File,
+        source: String = "desktop",
+    ) {
         engineScope.launch {
             try {
                 logFile.outputStream().bufferedWriter().use { sink ->
                     process.inputStream.bufferedReader().forEachLine { line ->
                         sink.appendLine(line)
                         sink.flush()
-                        AppLog.debug(SCOPE, "desktop: $line")
+                        AppLog.debug(SCOPE, "$source: $line")
                     }
                 }
             } catch (_: Exception) {
@@ -620,6 +692,11 @@ class ProotEngine(
          * is what marks an image as console only.
          */
         private const val DESKTOP_SUPERVISOR_RELATIVE_PATH = "usr/local/bin/dex-desktop"
+        private const val DISPLAY_BACKEND_MARKER_RELATIVE_PATH =
+            "usr/local/share/linux-on-dex/display-backend"
+        private const val NATIVE_X11_MARKER = "native-x11"
+        private const val XKB_CONFIG_ROOT_RELATIVE_PATH = "usr/share/X11/xkb"
+        private const val NATIVE_X11_SOCKET_RELATIVE_PATH = "tmp/.X11-unix/X1"
 
         /** Long enough for a broken container to fail, short enough not to stall. */
         private const val CONSOLE_STARTUP_GRACE_MILLIS = 1_500L
@@ -633,7 +710,7 @@ class ProotEngine(
          * starting X; generous beats a spurious failure on a slow phone.
          */
         private const val DESKTOP_STARTUP_TIMEOUT_MS = 180_000L
-        private const val VNC_POLL_INTERVAL_MS = 500L
+        private const val DISPLAY_POLL_INTERVAL_MS = 500L
         private const val VNC_CONNECT_TIMEOUT_MS = 400
         private const val LOG_TAIL_BYTES = 16_000
         private const val GRAPHICS_PROBE_TIMEOUT_SECONDS = 15L

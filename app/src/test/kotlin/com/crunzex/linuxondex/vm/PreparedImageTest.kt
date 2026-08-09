@@ -1,8 +1,10 @@
 package com.crunzex.linuxondex.vm
 
+import com.crunzex.linuxondex.engine.proot.RootfsImageInstaller
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
 
 class PreparedImageTest {
 
@@ -33,6 +35,21 @@ class PreparedImageTest {
         // A path that does not exist reports zero length, which is the
         // honest answer rather than a crash.
         assertEquals(0L, image("missing.qcow2").sizeMb)
+    }
+
+    @Test
+    fun `reclaimed rootfs still reports its imported size`() {
+        val archive = Files.createTempFile("ubuntu", ".rootfs.tar.gz").toFile()
+        try {
+            val sourceSize = 1_120L shl 20
+            archive.writeText(
+                RootfsImageInstaller.reclaimedArchiveText("archive-stamp", sourceSize)
+            )
+
+            assertEquals(1_120L, PreparedImage(archive, seedFile = null).sizeMb)
+        } finally {
+            archive.delete()
+        }
     }
 
     @Test

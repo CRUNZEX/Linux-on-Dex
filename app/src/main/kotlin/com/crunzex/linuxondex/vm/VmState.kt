@@ -26,6 +26,8 @@ sealed class VmState {
         val engine: EngineKind,
         val vncPort: Int?,
         val startedAtMillis: Long,
+        /** How the graphical session reaches Android; null for console-only guests. */
+        val displayEndpoint: DisplayEndpoint? = vncPort?.let(DisplayEndpoint::Rfb),
     ) : VmState()
 
     data object Stopping : VmState()
@@ -38,6 +40,16 @@ sealed class VmState {
         get() = this is Preparing || this is Starting || this is Stopping
 
     val isRunning: Boolean get() = this is Running
+}
+
+/**
+ * Display transport is part of runtime state, not inferred from an engine.
+ * This keeps QEMU on its RFB server while allowing new PRoot images to use
+ * the embedded native X server. Older PRoot images may still report RFB.
+ */
+sealed interface DisplayEndpoint {
+    data class Rfb(val port: Int) : DisplayEndpoint
+    data class NativeX11(val displayNumber: Int) : DisplayEndpoint
 }
 
 enum class StopReason {

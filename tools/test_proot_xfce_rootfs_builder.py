@@ -8,14 +8,12 @@ import proot_xfce_rootfs_builder as builder
 
 class ProotXfceRootfsBuilderTest(unittest.TestCase):
 
-    def test_runtime_uses_shared_vnc_and_lightweight_session(self) -> None:
-        self.assertIn("-AlwaysShared", builder.DESKTOP_SUPERVISOR)
-        self.assertIn("max_frame_rate=240", builder.DESKTOP_SUPERVISOR)
-        self.assertIn('-FrameRate "$max_frame_rate"', builder.DESKTOP_SUPERVISOR)
-        self.assertNotIn("-NeverShared", builder.DESKTOP_SUPERVISOR)
+    def test_runtime_uses_native_x11_and_lightweight_session(self) -> None:
+        self.assertIn("native X11 ready", builder.DESKTOP_SUPERVISOR)
+        self.assertNotIn("Xtigervnc", builder.DESKTOP_SUPERVISOR)
         self.assertIn("/usr/local/bin/dex-xfce-session", builder.DESKTOP_SUPERVISOR)
         self.assertNotIn("startxfce4", builder.DESKTOP_SUPERVISOR)
-        self.assertIn('while kill -0 "$xvnc_pid"', builder.DESKTOP_SUPERVISOR)
+        self.assertIn('while [ -S /tmp/.X11-unix/X1 ]', builder.DESKTOP_SUPERVISOR)
         self.assertIn("trap handle_shutdown HUP INT TERM", builder.DESKTOP_SUPERVISOR)
         self.assertNotIn("exec dbus-run-session", builder.DESKTOP_SUPERVISOR)
         syntax_check = subprocess.run(
@@ -67,9 +65,9 @@ class ProotXfceRootfsBuilderTest(unittest.TestCase):
 
     def test_android_group_ids_are_named_before_the_desktop_starts(self) -> None:
         naming_offset = builder.DESKTOP_SUPERVISOR.index("dex-name-groups")
-        vnc_offset = builder.DESKTOP_SUPERVISOR.index("Xtigervnc")
+        x11_offset = builder.DESKTOP_SUPERVISOR.index("native X11 ready")
 
-        self.assertLess(naming_offset, vnc_offset)
+        self.assertLess(naming_offset, x11_offset)
         self.assertIn("flock 9", builder.GROUP_NAMER_SCRIPT)
         self.assertIn("id -G", builder.GROUP_NAMER_SCRIPT)
 

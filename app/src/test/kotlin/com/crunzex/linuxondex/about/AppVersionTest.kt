@@ -14,6 +14,8 @@ import org.junit.Test
  */
 class AppVersionTest {
 
+    private val profileJson = Json { ignoreUnknownKeys = true }
+
     // ---- Parsing -------------------------------------------------------------
 
     @Test
@@ -123,8 +125,7 @@ class AppVersionTest {
             }
         """.trimIndent()
 
-        val profile = Json { ignoreUnknownKeys = true }
-            .decodeFromString(DeveloperProfile.serializer(), body)
+        val profile = profileJson.decodeFromString(DeveloperProfile.serializer(), body)
 
         assertEquals("CRUNZEX", profile.displayName)
         assertEquals("@CRUNZEX", profile.handle)

@@ -17,8 +17,8 @@ import com.crunzex.linuxondex.vm.VmState
  * The graphical display as its own task: on DeX this is the "monitor"
  * window, draggable and resizable independently of the terminal.
  *
- * Opens its own VNC connection — QEMU's server accepts several clients, so
- * this and the in-app display can even run side by side.
+ * QEMU opens its own RFB connection. PRoot hands off to the embedded native
+ * X11 activity, whose content is a SurfaceView.
  */
 class DisplayActivity : ComponentActivity() {
 
@@ -30,7 +30,7 @@ class DisplayActivity : ComponentActivity() {
             LinuxOnDexTheme {
                 val vmState by container.vmController.vmState.collectAsStateWithLifecycle()
                 DisplayScreen(
-                    vncPort = (vmState as? VmState.Running)?.vncPort,
+                    displayEndpoint = (vmState as? VmState.Running)?.displayEndpoint,
                     onBack = { finish() },
                 )
             }

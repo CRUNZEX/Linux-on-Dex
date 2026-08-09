@@ -17,8 +17,8 @@ android {
         targetSdk = 36
         // versionCode keeps counting from the 0.x/2.x builds so devices that
         // already have the app update in place — Android forbids downgrading it.
-        versionCode = 39
-        versionName = "1.2.0"
+        versionCode = 43
+        versionName = "1.3.0-beta4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -40,8 +40,8 @@ android {
 
     signingConfigs {
         create("release") {
-            // Development signing key, committed so anyone can produce an
-            // installable build. Replace it before publishing anywhere.
+            // Dedicated update key. The keystore is intentionally ignored by
+            // Git and must be backed up securely; losing it prevents updates.
             storeFile = rootProject.file(
                 providers.gradleProperty("lxdKeystoreFile")
                     .getOrElse("keystore/crunzex-release.jks")
@@ -50,6 +50,9 @@ android {
                 .getOrElse("crunzex")
             keyAlias = providers.gradleProperty("lxdKeyAlias").getOrElse("crunzex")
             keyPassword = providers.gradleProperty("lxdKeyPassword").getOrElse("crunzex")
+            enableV1Signing = false
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 
@@ -84,6 +87,8 @@ android {
 }
 
 dependencies {
+    implementation(files("libs/termux-x11-lorie-arm64.aar"))
+    implementation(libs.androidx.preference.ktx)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

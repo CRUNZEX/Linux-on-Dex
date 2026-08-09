@@ -22,7 +22,12 @@ data class PreparedImage(
         PreparedImageFormat.fromFileName(diskFile.name) ?: PreparedImageFormat.QCOW2_DISK
 
     val displayName: String get() = prettifyFileName(diskFile.name)
-    val sizeMb: Long get() = diskFile.length() shr 20
+    val sizeMb: Long
+        get() = if (format == PreparedImageFormat.PROOT_ROOTFS) {
+            RootfsImageInstaller.sourceSizeBytes(diskFile) shr 20
+        } else {
+            diskFile.length() shr 20
+        }
 
     /** "linux-on-dex-ubuntu-24.04-arm64.qcow2" -> "Ubuntu 24.04 arm64". */
     private fun prettifyFileName(fileName: String): String = fileName

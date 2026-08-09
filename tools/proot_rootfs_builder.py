@@ -12,7 +12,7 @@ How it is produced
 ------------------
 The same recipe as every baked flavour: boot the Ubuntu cloud image once
 under hardware acceleration with a one-shot cloud-init seed that installs
-GNOME, TigerVNC, git, OpenSSH and VS Code, writes the PRoot session scripts,
+GNOME, X11 data, git, OpenSSH and VS Code, writes the PRoot session scripts,
 strips everything a kernel-less container cannot use (kernel, firmware,
 bootloader, snapd), and finally streams `tar | gzip` of the finished root
 filesystem onto an attached scratch disk. The host trims that scratch disk to
@@ -20,8 +20,7 @@ the byte count the guest reported and the result IS the archive.
 
 The app pairs this with ProotCommandFactory/dex-desktop: the archive bakes
 `/usr/local/bin/dex-desktop`, which the engine starts inside PRoot to bring
-up D-Bus, Xvnc (the VNC server the app's Display screen connects to) and the
-GNOME Xorg session.
+up D-Bus and the GNOME Xorg session against the app's embedded native X server.
 """
 
 from __future__ import annotations
@@ -35,7 +34,7 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
-RELEASE_VERSION = "1.1.13"
+RELEASE_VERSION = "1.3.0-beta2"
 
 
 @dataclass(frozen=True)
@@ -243,6 +242,12 @@ bootcmd:
   - [sh, -c, "systemctl mask --now snapd.service snapd.socket snapd.seeded.service 2>/dev/null || true"]
 
 write_files:
+  # Runtime contract: images carrying this marker use the app's native X11
+  # SurfaceView. Images without it remain compatible through legacy VNC.
+  - path: /usr/local/share/linux-on-dex/display-backend
+    permissions: "0644"
+    content: |
+      native-x11
   # The app starts this inside PRoot; it owns the graphical session.
   - path: /usr/local/bin/dex-desktop
     permissions: "0755"
@@ -452,7 +457,7 @@ runcmd:
     done
     apt-get purge -y wpasupplicant 2>/dev/null || true
     apt-get autoremove --purge -y 2>/dev/null || true
-    for essential in /usr/bin/gnome-shell /usr/bin/Xtigervnc; do
+    for essential in /usr/bin/gnome-shell /usr/bin/xkbcomp; do
       test -x "$essential" || echo "DEX_BAKE_STEP_FAILED: trimming removed $essential"
     done
     # ibus is an input-method framework with nothing to do here, and it
@@ -461,7 +466,7 @@ runcmd:
     apt-get purge -y ibus packagekit rygel gnome-remote-desktop 2>/dev/null || true
     apt-get autoremove --purge -y 2>/dev/null || true
     # Purging must never take the desktop with it.
-    for essential in /usr/bin/gnome-shell /usr/bin/Xtigervnc /usr/local/bin/code /usr/local/bin/firefox; do
+    for essential in /usr/bin/gnome-shell /usr/bin/xkbcomp /usr/local/bin/code /usr/local/bin/firefox; do
       test -x "$essential" || echo "DEX_BAKE_STEP_FAILED: purge removed $essential"
     done
     for removed in /usr/bin/gnome-flashback /usr/bin/gnome-panel /usr/bin/openbox; do
@@ -562,7 +567,7 @@ GUEST_PACKAGES = (
     "ubuntu-wallpapers",
     "fonts-ubuntu",
     "dbus-x11",
-    "tigervnc-standalone-server",
+    "xkb-data",
     "git",
     "openssh-server",
     "openssh-client",
@@ -580,12 +585,10 @@ GUEST_PACKAGES = (
 DESKTOP_SUPERVISOR_SCRIPT = r"""#!/bin/sh
 # Linux on DeX desktop supervisor. The app runs this as PRoot's root
 # process; when it exits the whole session is taken down (--kill-on-exit).
-# The app provides: DEX_RESOLUTION (e.g. 1280x800), DEX_VNC_PORT (e.g. 5901).
+# The app starts native X11 on DISPLAY=:1 before this supervisor.
 set -u
 
 RESOLUTION="${DEX_RESOLUTION:-1280x800}"
-VNC_PORT="${DEX_VNC_PORT:-5901}"
-MAX_FRAME_RATE=240
 
 log() { echo "[dex-desktop] $*"; }
 
@@ -601,7 +604,7 @@ export XDG_SESSION_MODE=user
 export GDMSESSION=gnome-xorg
 # GNOME Shell/Mutter owns the whole visible desktop. Keep that compositor on
 # llvmpipe even when the app has validated virgl: vendor EGL resets during an
-# application launch otherwise terminate Mutter and leave Xvnc showing a
+# application launch otherwise terminate Mutter and leave the X11 root window
 # black root window. `dex-gpu <command>` remains available for explicit native
 # acceleration without putting the session leader on that failure domain.
 export LIBGL_ALWAYS_SOFTWARE=1
@@ -623,7 +626,7 @@ export GVFS_DISABLE_FUSE=1
 mkdir -p "$XDG_RUNTIME_DIR" /run/dbus /run/sshd /tmp/.X11-unix /var/lib/dbus
 chmod 700 "$XDG_RUNTIME_DIR"
 chmod 1777 /tmp /tmp/.X11-unix
-rm -f /run/dbus/pid /tmp/.X1-lock /tmp/.X11-unix/X1
+rm -f /run/dbus/pid
 
 # Directories apt and dpkg require to exist before they will do anything.
 # They are normally shipped by the packages themselves, so a missing one is a
@@ -647,31 +650,14 @@ else
     log "sshd failed to start (continuing without it)"
 fi
 
-log "starting Xvnc :1 at $RESOLUTION on port $VNC_PORT"
-# -FrameRate 240: the requested per-client ceiling. Android still presents at
-# the physical display refresh rate (120 Hz on the target S23 Ultra).
-# -AlwaysShared: a newly recreated DeX window must not evict the viewer that
-#   is still unwinding its blocking socket read.
-#
-# Deliberately not tuned further: TigerVNC 1.13's remaining update options
-# (CompareFB in particular) trade bandwidth against CPU for a *network*
-# client. Over loopback that trade is not obviously either way, and this
-# server rejects options it does not know by refusing to start at all — so
-# only flags verified against its own help output are used here.
-Xtigervnc :1 -geometry "$RESOLUTION" -depth 24 \
-    -rfbport "$VNC_PORT" -localhost -SecurityTypes None -AlwaysShared \
-    -FrameRate "$MAX_FRAME_RATE" \
-    -desktop "Linux on DeX" &
-XVNC_PID=$!
-
-# X must accept clients before the session may start.
+# Native X must accept clients before the desktop may start.
 tries=0
 while [ ! -S /tmp/.X11-unix/X1 ]; do
     tries=$((tries + 1))
-    if [ "$tries" -gt 100 ]; then log "Xvnc never created its socket"; exit 1; fi
-    kill -0 "$XVNC_PID" 2>/dev/null || { log "Xvnc exited early"; exit 1; }
+    if [ "$tries" -gt 100 ]; then log "native X11 never created its socket"; exit 1; fi
     sleep 0.1
 done
+log "native X11 ready at $DISPLAY ($RESOLUTION requested)"
 
 GNOME_SESSION_PID=""
 
@@ -681,12 +667,10 @@ stop_desktop_children() {
         wait "$GNOME_SESSION_PID" 2>/dev/null || true
         GNOME_SESSION_PID=""
     fi
-    kill "$XVNC_PID" 2>/dev/null || true
-    wait "$XVNC_PID" 2>/dev/null || true
 }
 
 handle_shutdown_signal() {
-    log "shutdown requested; stopping GNOME and Xvnc"
+    log "shutdown requested; stopping GNOME"
     stop_desktop_children
     exit 0
 }
@@ -694,13 +678,13 @@ handle_shutdown_signal() {
 trap handle_shutdown_signal HUP INT TERM
 
 log "starting the native GNOME Shell X11 session"
-# Xvnc is the stable session leader. GNOME Shell and Mutter may exit when a
+# Native X11 is the stable display. GNOME Shell and Mutter may exit when a
 # heavy Electron/browser workload exhausts a renderer or when Android kills a
-# phantom child. Restarting just the desktop session preserves VNC, SSH, open
+# phantom child. Restarting just the desktop session preserves X11, SSH, open
 # terminal connections and the extracted rootfs instead of taking the entire
 # PRoot container down with one component.
 restart_attempt=0
-while kill -0 "$XVNC_PID" 2>/dev/null; do
+while [ -S /tmp/.X11-unix/X1 ]; do
     session_started_at=$(date +%s)
     dbus-run-session -- sh -c '\
         /usr/libexec/gsd-xsettings >>/tmp/gsd-xsettings.log 2>&1 & \
@@ -711,8 +695,8 @@ while kill -0 "$XVNC_PID" 2>/dev/null; do
     session_exit_code=$?
     GNOME_SESSION_PID=""
 
-    if ! kill -0 "$XVNC_PID" 2>/dev/null; then
-        log "Xvnc exited while GNOME was running"
+    if [ ! -S /tmp/.X11-unix/X1 ]; then
+        log "native X11 stopped while GNOME was running"
         exit 1
     fi
     if [ "$session_exit_code" -eq 0 ]; then
@@ -733,7 +717,7 @@ while kill -0 "$XVNC_PID" 2>/dev/null; do
     sleep "$restart_delay"
 done
 
-log "Xvnc stopped unexpectedly"
+log "native X11 stopped unexpectedly"
 exit 1
 """
 
@@ -806,8 +790,7 @@ export MESA_GLES_VERSION_OVERRIDE=3.1
 exec "$@"
 """
 
-# Apps may not bind ports below 1024, and the phone's own network must not
-# be exposed by default; localhost matches the VNC trust model.
+# Apps may not bind ports below 1024, and SSH must not expose the phone by default.
 # Everything apt needs in order to work under syscall translation.
 #
 # Sandbox::User: apt normally drops to the unprivileged `_apt` user to fetch
@@ -1049,7 +1032,8 @@ REQUIRED_ARCHIVE_ENTRIES = (
     "usr/local/bin/dex-processes",
     "usr/local/bin/dex-gpu",
     "usr/bin/glxgears",
-    "usr/bin/Xtigervnc",
+    "usr/bin/xkbcomp",
+    "usr/local/share/linux-on-dex/display-backend",
     "usr/bin/gnome-shell",
     "usr/bin/git",
     "usr/sbin/sshd",

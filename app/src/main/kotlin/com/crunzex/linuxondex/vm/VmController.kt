@@ -21,6 +21,7 @@ import com.crunzex.linuxondex.engine.EngineSelector
 import com.crunzex.linuxondex.engine.SerialConsoleConnection
 import com.crunzex.linuxondex.engine.VirtualizationEngine
 import com.crunzex.linuxondex.engine.proot.ProotEngine
+import com.crunzex.linuxondex.engine.proot.NativeX11Server
 import com.crunzex.linuxondex.engine.proot.RootfsImageInstaller
 import com.crunzex.linuxondex.engine.qemu.QemuAccelerator
 import com.crunzex.linuxondex.engine.qemu.QemuVmEngine
@@ -40,6 +41,7 @@ class VmController(
     private val capabilityProbe: CapabilityProbe,
     private val paths: VmPaths,
     private val payloadInstaller: PayloadInstaller,
+    private val nativeX11Server: NativeX11Server,
     private val diskManager: DiskImageManager,
     private val repository: VmRepository,
     private val preparedImages: PreparedImageRepository,
@@ -139,6 +141,9 @@ class VmController(
             // the failure that used to leave force-stopping the app as the
             // only way out.
             guestProcessReaper.killAllGuestProcesses()
+            if (!paths.resetTransientRuntimeDirectory()) {
+                throw LxdError.StorageFailed("resetting the temporary VM cache")
+            }
             val engine = createEngineFor(config)
             attachEngine(engine)
             AppLog.info(SCOPE, "starting '${config.id}' with ${engine.kind}")
@@ -282,7 +287,7 @@ class VmController(
         EngineKind.QEMU_TCG ->
             qemuEngine(QemuAccelerator.TCG)
         EngineKind.PROOT ->
-            ProotEngine(paths, payloadInstaller)
+            ProotEngine(paths, payloadInstaller, nativeX11Server)
     }
 
     private fun qemuEngine(accelerator: QemuAccelerator): QemuVmEngine =
