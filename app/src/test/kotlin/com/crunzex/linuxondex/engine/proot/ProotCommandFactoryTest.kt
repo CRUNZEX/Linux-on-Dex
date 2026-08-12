@@ -123,6 +123,41 @@ class ProotCommandFactoryTest {
     }
 
     @Test
+    fun `renderer stages change exactly the bind and env they must`() {
+        val cpuinfoBind = "${paths.portableCpuinfoFile}:${ProotCommandFactory.CPUINFO_GUEST_PATH}"
+        fun sessionAt(stage: RendererStage) = ProotCommandFactory.desktopSession(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            displayResolution = "1280x800",
+            vncPort = 5901,
+            sharedFolderDir = null,
+            displayBackend = ProotDisplayBackend.NATIVE_X11,
+            rendererStage = stage,
+        )
+
+        val native = sessionAt(RendererStage.NATIVE)
+        assertFalse(native.arguments.contains(cpuinfoBind))
+        assertNull(native.environment["DEX_RENDERER"])
+
+        val portable = sessionAt(RendererStage.PORTABLE_CPU)
+        assertTrue(
+            "portable stage must fake /proc/cpuinfo for the JIT",
+            portable.arguments.zipWithNext().any { (flag, bind) ->
+                flag == "-b" && bind == cpuinfoBind
+            },
+        )
+        assertNull("portable stage keeps llvmpipe", portable.environment["DEX_RENDERER"])
+
+        val failsafe = sessionAt(RendererStage.FAILSAFE_SOFTPIPE)
+        assertTrue(
+            failsafe.arguments.zipWithNext().any { (flag, bind) ->
+                flag == "-b" && bind == cpuinfoBind
+            },
+        )
+        assertEquals("softpipe", failsafe.environment["DEX_RENDERER"])
+    }
+
+    @Test
     fun `every session shares one short host directory as its tmp`() {
         val guestTmpBind = "${paths.prootGuestTmpDir}:${ProotCommandFactory.GUEST_TMP_GUEST_PATH}"
         val sessions = listOf(

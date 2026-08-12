@@ -248,7 +248,9 @@ class RootfsImageInstaller(private val paths: VmPaths) {
 
     companion object {
         private const val SCOPE = "RootfsImageInstaller"
-        private const val STAMP_FILE_NAME = ".linux-on-dex-rootfs-stamp"
+
+        /** Also read by the engine to key per-image state (renderer ladder). */
+        internal const val STAMP_FILE_NAME = ".linux-on-dex-rootfs-stamp"
         private const val FILE_BUFFER_BYTES = 1 shl 18
         private const val GZIP_BUFFER_BYTES = 1 shl 16
         private const val EXTRACTED_SIZE_FACTOR = 4L

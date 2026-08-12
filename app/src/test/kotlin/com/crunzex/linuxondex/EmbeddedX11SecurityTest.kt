@@ -55,6 +55,19 @@ class EmbeddedX11SecurityTest {
                 assertFalse(classNames.any { it.endsWith("KeyInterceptor.class") })
                 assertTrue(classNames.any { it.endsWith("MainActivity.class") })
 
+                // The stock preferences activity must stay out of the AAR:
+                // the app ships its own com.termux.x11.LoriePreferences and
+                // a leftover copy would break the build at dex merge. The
+                // PrefsProto classes must stay in: the viewer reads every
+                // setting through them.
+                assertFalse(
+                    "stock LoriePreferences activity has returned to the AAR",
+                    classNames.contains("com/termux/x11/LoriePreferences.class"),
+                )
+                assertTrue(
+                    classNames.contains("com/termux/x11/LoriePreferences\$PrefsProto.class"),
+                )
+
                 val loaderConstants = commandEntryPointBytes
                     ?.toString(Charsets.ISO_8859_1)
                     ?: error("CmdEntryPoint is missing")

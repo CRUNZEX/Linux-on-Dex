@@ -2,6 +2,7 @@ package com.crunzex.linuxondex.ui.display
 
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
@@ -15,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Button
@@ -47,6 +49,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import com.crunzex.linuxondex.core.AppLog
+import com.crunzex.linuxondex.display.settings.DisplayPreferenceKeys
+import com.crunzex.linuxondex.display.settings.DisplaySessionPreferences
 import com.crunzex.linuxondex.engine.proot.EmbeddedX11ViewerDefaults
 import com.crunzex.linuxondex.display.vnc.ActiveConnectionOwner
 import com.crunzex.linuxondex.display.vnc.RfbClient
@@ -82,6 +86,7 @@ private fun RfbDisplayScreen(
     onBack: (() -> Unit)?,
     onOpenInNewWindow: (() -> Unit)?,
 ) {
+    val context = LocalContext.current
     var statusText by remember { mutableStateOf("Connecting…") }
     var vncView by remember { mutableStateOf<VncView?>(null) }
     // A desktop guest paints nothing for a while after the display attaches.
@@ -116,6 +121,9 @@ private fun RfbDisplayScreen(
                 actions = {
                     IconButton(onClick = { vncView?.let(::toggleSoftKeyboard) }) {
                         Icon(Icons.Filled.Keyboard, contentDescription = "Toggle keyboard")
+                    }
+                    IconButton(onClick = { openDisplaySettings(context) }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Display settings")
                     }
                     if (onOpenInNewWindow != null) {
                         IconButton(onClick = onOpenInNewWindow) {
@@ -158,6 +166,7 @@ private fun RfbDisplayScreen(
                     }
                 },
             )
+            vncView?.let { view -> ApplySharedDisplaySettings(view) }
             if (!hasPaintedFrame) {
                 WaitingForGuestDisplay()
             }
@@ -193,10 +202,16 @@ private fun NativeX11DisplayScreen(onBack: (() -> Unit)?) {
                         }
                     }
                 },
+                actions = {
+                    IconButton(onClick = { openDisplaySettings(context) }) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Display settings")
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Color.Black,
                     titleContentColor = Color.White,
                     navigationIconContentColor = Color.White,
+                    actionIconContentColor = Color.White,
                 ),
             )
         },
@@ -351,6 +366,41 @@ private fun reportStatsWhileConnected(
             val activity = if (framesPerSecond > 0) "$framesPerSecond fps" else "ready"
             dispatchToDisplayThread { onStatus("$resolution · $activity") }
         }
+}
+
+/**
+ * Keeps the VNC view in step with Display settings while it is on screen —
+ * the same keys the native X11 viewer reads, applied live on change.
+ */
+@Composable
+private fun ApplySharedDisplaySettings(view: VncView) {
+    DisposableEffect(view) {
+        val preferences = DisplaySessionPreferences(view.context)
+
+        fun applyAll() {
+            view.stretchToFill = preferences.stretchToFill
+            view.smoothScaling = preferences.smoothScaling
+            view.keepScreenOn = preferences.keepScreenAwake
+        }
+
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == DisplayPreferenceKeys.STRETCH_TO_FILL ||
+                key == DisplayPreferenceKeys.FILTERING_MODE ||
+                key == DisplayPreferenceKeys.SCREEN_IDLE_TIMEOUT
+            ) {
+                applyAll()
+            }
+        }
+
+        applyAll()
+        preferences.registerListener(listener)
+        onDispose { preferences.unregisterListener(listener) }
+    }
+}
+
+/** Both transports open the same One UI settings screen. */
+private fun openDisplaySettings(context: Context) {
+    context.startActivity(Intent(context, com.termux.x11.LoriePreferences::class.java))
 }
 
 /** UI callbacks must not depend on the VNC view already being attached. */

@@ -22,8 +22,12 @@ object EmbeddedX11ViewerDefaults {
     /** Taps click where the finger is; a two-finger tap is a right click. */
     private const val TOUCH_MODE_SIMULATED_TOUCH = "2"
 
+    /** Matches the VNC view's long-standing bilinear default. */
+    private const val FILTERING_BILINEAR = "bilinear"
+
     private val firstRunDefaults = mapOf(
         "touchMode" to TOUCH_MODE_SIMULATED_TOUCH,
+        "displayFilteringMode" to FILTERING_BILINEAR,
     )
 
     fun ensureApplied(context: Context) {

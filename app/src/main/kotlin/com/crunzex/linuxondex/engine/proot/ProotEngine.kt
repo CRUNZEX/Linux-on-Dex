@@ -189,7 +189,8 @@ class ProotEngine(
 
     private fun startDesktopSessionLocked(config: VmConfig, rootfsDir: File) {
         prepareSharedMemoryDir()
-        graphicsBridgeEnabled = startVerifiedGraphicsBridge(rootfsDir)
+        val rendererStage = prepareRendererStage(rootfsDir)
+        graphicsBridgeEnabled = startVerifiedGraphicsBridge(rootfsDir, rendererStage)
         val displayBackend = displayBackendFor(rootfsDir)
 
         _state.value = VmState.Starting(kind)
@@ -205,6 +206,7 @@ class ProotEngine(
             sharedFolderDir = paths.sharedFolderDir?.also { it.mkdirs() },
             graphicsBridgeEnabled = graphicsBridgeEnabled,
             displayBackend = displayBackend,
+            rendererStage = rendererStage,
         )
         val process = command.start(redirectErrorStream = true)
         sessionProcess = process
@@ -229,6 +231,35 @@ class ProotEngine(
             displayEndpoint = displayEndpoint,
         )
         AppLog.info(SCOPE, "desktop session ready via $displayBackend")
+    }
+
+    /**
+     * Chooses the renderer for this boot and makes its prerequisites real:
+     * the sticky ladder remembers a SIGILL-driven downgrade per image, and
+     * any stage past NATIVE needs the curated cpuinfo on disk before PRoot
+     * can bind it over /proc/cpuinfo.
+     */
+    private fun prepareRendererStage(rootfsDir: File): RendererStage {
+        val stage = rendererLadderFor(rootfsDir).currentStage()
+        if (stage.usesPortableCpuProfile) {
+            writePortableCpuProfile()
+        }
+        if (stage != RendererStage.NATIVE) {
+            AppLog.info(SCOPE, "desktop renderer: ${stage.describe()} (sticky after SIGILL)")
+        }
+        return stage
+    }
+
+    private fun rendererLadderFor(rootfsDir: File): RendererFallbackLadder =
+        RendererFallbackLadder(
+            stateFile = paths.rendererStageFile,
+            rootfsStamp = rootfsDir.resolve(RootfsImageInstaller.STAMP_FILE_NAME)
+                .takeIf(File::isFile)?.readText()?.trim() ?: rootfsDir.name,
+        )
+
+    private fun writePortableCpuProfile() {
+        val processorCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        paths.portableCpuinfoFile.writeText(PortableCpuProfile.cpuinfoText(processorCount))
     }
 
     private fun displayBackendFor(rootfsDir: File): ProotDisplayBackend {
@@ -311,12 +342,15 @@ class ProotEngine(
      * complete path before exporting virpipe to the desktop, trying Samsung's
      * system EGL first and bundled ANGLE as the compatibility fallback.
      */
-    private fun startVerifiedGraphicsBridge(rootfsDir: File): Boolean {
+    private fun startVerifiedGraphicsBridge(
+        rootfsDir: File,
+        rendererStage: RendererStage,
+    ): Boolean {
         for (backend in AndroidVirglBridge.Backend.entries) {
             if (!graphicsBridge.start(backend)) continue
 
             val probeResult = runCatching {
-                ProotCommandFactory.graphicsProbe(paths, rootfsDir)
+                ProotCommandFactory.graphicsProbe(paths, rootfsDir, rendererStage)
                     .runAndCaptureOutput(timeoutSeconds = GRAPHICS_PROBE_TIMEOUT_SECONDS)
             }
             if (probeResult.isFailure) {
@@ -508,6 +542,7 @@ class ProotEngine(
             if (shutdownInitiated.get()) return@launch // stop() owns the state
             if (!_state.value.isRunning) return@launch // startup failures report themselves
             if (isDesktopSession && exitCode != 0) {
+                recordRendererFallbackAfterCrash(exitCode)
                 _state.value = VmState.Failed(
                     LxdError.BootFailed(
                         "the desktop session ended unexpectedly (exit $exitCode). " +
@@ -588,6 +623,9 @@ class ProotEngine(
                     rootfsDir = rootfsDir,
                     sharedFolderDir = paths.sharedFolderDir,
                     graphicsBridgeEnabled = graphicsBridgeEnabled && graphicsBridge.isRunning,
+                    // GUI programs launched from a terminal JIT-compile like
+                    // the desktop does; they need the same safe CPU profile.
+                    rendererStage = rendererLadderFor(rootfsDir).currentStage(),
                 )
                 .startTracked(processIdFile, redirectErrorStream = true)
             val shell = ConsoleShellProcess(
@@ -645,7 +683,26 @@ class ProotEngine(
             "app to keep (its phantom-process limit). Close other apps and start " +
             "again, or use an image built for this limit. Log: "
         EXIT_CODE_SIGTERM -> "Android or the system asked the session to stop. Log: "
+        RendererFallbackLadder.EXIT_CODE_ILLEGAL_INSTRUCTION ->
+            "A desktop program used a CPU instruction this device does not " +
+                "support. The next start uses a more compatible renderer " +
+                "automatically — start Linux again. Log: "
         else -> "Log: "
+    }
+
+    /**
+     * SIGILL means llvmpipe compiled code this SoC cannot run; remember to
+     * boot the next session one rung down the renderer ladder. The restart
+     * itself is the service's job — this only has to make the next attempt
+     * different from the one that just died.
+     */
+    private fun recordRendererFallbackAfterCrash(exitCode: Int) {
+        val rootfsDir = activeRootfsDir ?: return
+        val nextStage = rendererLadderFor(rootfsDir).advanceAfterExit(exitCode) ?: return
+        AppLog.warn(
+            SCOPE,
+            "desktop died with SIGILL; next start uses ${nextStage.describe()}",
+        )
     }
 
     /**

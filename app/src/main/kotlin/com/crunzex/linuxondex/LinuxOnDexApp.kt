@@ -1,6 +1,7 @@
 package com.crunzex.linuxondex
 
 import android.app.Application
+import com.crunzex.linuxondex.display.settings.DisplayWindowPerformance
 
 /**
  * Application entry point.
@@ -16,5 +17,6 @@ class LinuxOnDexApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        DisplayWindowPerformance.install(this)
     }
 }

@@ -6,6 +6,8 @@ Linux on DeX applies the patch set already shipped in that revision under `lorie
 
 The host launches `CmdEntryPoint` inside a private bound `:x11` service process. This preserves Termux:X11's process isolation and Unix-socket protocol without creating an Android phantom `app_process` child. The embedded entry point calls `System.loadLibrary("Xlorie")` first so Android resolves the installed native library; it retains the upstream resource-path fallback for standalone `app_process` use. The loader change is recorded under `patches/`.
 
-SHA-256: `346d98e909478980a13e9fd2554efc76d26bc4473f6142e4f4abaf2ca830429a`
+The stock `LoriePreferences` activity (and its fragment/receiver inner classes) is removed from `classes.jar` by `tools/strip_embedded_x11_preferences.py`: every viewer code path opens settings with an explicit `Intent(context, LoriePreferences.class)`, and the app provides its own One UI `com.termux.x11.LoriePreferences` under that exact name. The `LoriePreferences$PrefsProto` classes remain — the viewer's `Prefs` reads every setting through them, from the same default SharedPreferences the replacement screen writes.
+
+SHA-256: `3ecae407d809dc169a6ad4c82bdeb1df27522aae5d6a6f31138adc188d1745f3`
 
 See [LICENSE](LICENSE) for the complete GPL-3.0 text.

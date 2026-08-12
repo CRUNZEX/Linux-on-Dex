@@ -86,10 +86,16 @@
             android:theme="@style/LorieAppTheme"
             android:windowSoftInputMode="stateHidden|adjustNothing"
             tools:node="replace" />
+        <!-- The app's One UI display settings, owning the class name the
+             embedded viewer launches explicitly. The stock implementation is
+             stripped from the AAR at tools/strip_embedded_x11_preferences.py. -->
         <activity
             android:name="com.termux.x11.LoriePreferences"
+            android:excludeFromRecents="true"
             android:exported="false"
-            tools:replace="android:exported" />
+            android:label="Display settings"
+            android:theme="@style/Theme.LinuxOnDex"
+            tools:node="replace" />
         <service
             android:name=".service.VmService"
             android:exported="false"

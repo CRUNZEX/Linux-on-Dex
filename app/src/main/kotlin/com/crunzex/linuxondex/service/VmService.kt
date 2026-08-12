@@ -36,6 +36,7 @@ class VmService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var stateObserverStarted = false
     private var recoveryJob: Job? = null
+    private var recoveryBudgetRefillJob: Job? = null
     private val prootRecoveryPolicy = ProotRecoveryPolicy()
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -109,6 +110,7 @@ class VmService : Service() {
                     is VmState.Running -> {
                         vmWasLive = true
                         updateNotification(getString(R.string.notification_vm_running))
+                        scheduleRecoveryBudgetRefill()
                     }
                     is VmState.Stopping -> updateNotification("Shutting down…")
                     is VmState.Failed -> {
@@ -130,6 +132,24 @@ class VmService : Service() {
         }
     }
 
+    /**
+     * Refills the recovery budget after a session stays up for a while.
+     * The delay is the point: the SIGILL renderer ladder needs its quick
+     * consecutive crashes to share one budget, so only a session that
+     * survived well past startup counts as healthy.
+     */
+    private fun scheduleRecoveryBudgetRefill() {
+        if (recoveryBudgetRefillJob?.isActive == true) return
+        recoveryBudgetRefillJob = serviceScope.launch {
+            delay(HEALTHY_SESSION_MILLIS)
+            if ((application as LinuxOnDexApp).container.vmController.vmState.value
+                is VmState.Running
+            ) {
+                prootRecoveryPolicy.noteSessionStayedHealthy()
+            }
+        }
+    }
+
     /** Restarts only PRoot, and only a bounded number of times. */
     private fun scheduleProotRecovery(
         controller: com.crunzex.linuxondex.vm.VmController,
@@ -146,6 +166,10 @@ class VmService : Service() {
             if (controller.vmState.value !is VmState.Failed) return@launch
             try {
                 controller.startPrimaryVm()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                // The scope was torn down mid-start (user stop, service wind
+                // down) — routine lifecycle, not a recovery failure.
+                throw cancelled
             } catch (error: Exception) {
                 // VmController publishes Failed with the precise reason. Its
                 // state observer schedules the next bounded attempt or winds
@@ -241,6 +265,9 @@ class VmService : Service() {
         private const val WAKE_LOCK_TAG = "LinuxOnDex:vm"
         private const val ACTION_START_VM = "com.crunzex.linuxondex.action.START_VM"
         private const val ACTION_STOP_VM = "com.crunzex.linuxondex.action.STOP_VM"
+
+        /** A session running this long counts as healthy (see budget refill). */
+        private const val HEALTHY_SESSION_MILLIS = 120_000L
         private const val EXTRA_STOP_ORIGIN = "stop_origin"
         private const val STOP_ORIGIN_NOTIFICATION = "notification"
         private const val STOP_ORIGIN_APP_UI = "app UI"

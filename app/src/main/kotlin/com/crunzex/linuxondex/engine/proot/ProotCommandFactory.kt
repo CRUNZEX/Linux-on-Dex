@@ -30,9 +30,11 @@ object ProotCommandFactory {
         sharedFolderDir: File?,
         graphicsBridgeEnabled: Boolean = false,
         displayBackend: ProotDisplayBackend = ProotDisplayBackend.LEGACY_VNC,
+        rendererStage: RendererStage = RendererStage.NATIVE,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
         arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
+            portableCpuArguments(paths, rendererStage) +
             listOf(DESKTOP_SUPERVISOR_GUEST_PATH),
         environment = guestEnvironment(
             paths = paths,
@@ -41,13 +43,34 @@ object ProotCommandFactory {
         ) + mapOf(
             "DEX_RESOLUTION" to displayResolution,
             "DEX_DISPLAY_BACKEND" to displayBackend.name.lowercase(),
-        ) + if (displayBackend == ProotDisplayBackend.LEGACY_VNC) {
-            mapOf("DEX_VNC_PORT" to vncPort.toString())
-        } else {
-            mapOf("DISPLAY" to NATIVE_X11_DISPLAY)
-        },
+        ) + rendererEnvironment(rendererStage) +
+            if (displayBackend == ProotDisplayBackend.LEGACY_VNC) {
+                mapOf("DEX_VNC_PORT" to vncPort.toString())
+            } else {
+                mapOf("DISPLAY" to NATIVE_X11_DISPLAY)
+            },
         workingDirectory = paths.vmRootDir,
     )
+
+    /**
+     * The portable CPU profile is a bind, so it must be decided at launch:
+     * LLVM-based JITs in the session then derive their code-generation
+     * target from the curated file instead of the real one.
+     */
+    private fun portableCpuArguments(paths: VmPaths, stage: RendererStage): List<String> =
+        if (stage.usesPortableCpuProfile) {
+            listOf("-b", "${paths.portableCpuinfoFile.absolutePath}:$CPUINFO_GUEST_PATH")
+        } else {
+            emptyList()
+        }
+
+    /** The supervisor picks its Gallium driver from this. */
+    private fun rendererEnvironment(stage: RendererStage): Map<String, String> =
+        if (stage.usesSoftpipeRenderer) {
+            mapOf("DEX_RENDERER" to "softpipe")
+        } else {
+            emptyMap()
+        }
 
     /**
      * Starts `/usr/local/bin/dex-session` — the console container's leader.
@@ -87,9 +110,11 @@ object ProotCommandFactory {
         rootfsDir: File,
         sharedFolderDir: File?,
         graphicsBridgeEnabled: Boolean = false,
+        rendererStage: RendererStage = RendererStage.NATIVE,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
         arguments = rootfsArguments(paths, rootfsDir, sharedFolderDir, graphicsBridgeEnabled) +
+            portableCpuArguments(paths, rendererStage) +
             listOf("/usr/bin/script", "-q", "-c", INTERACTIVE_LOGIN_COMMAND, "/dev/null"),
         environment = guestEnvironment(
             paths = paths,
@@ -103,6 +128,7 @@ object ProotCommandFactory {
     fun graphicsProbe(
         paths: VmPaths,
         rootfsDir: File,
+        rendererStage: RendererStage = RendererStage.NATIVE,
     ): NativeCommand = NativeCommand(
         program = paths.prootBinary,
         arguments = rootfsArguments(
@@ -110,7 +136,8 @@ object ProotCommandFactory {
             rootfsDir = rootfsDir,
             sharedFolderDir = null,
             graphicsBridgeEnabled = true,
-        ) + listOf("/usr/bin/eglinfo", "-B", "-p", "surfaceless"),
+        ) + portableCpuArguments(paths, rendererStage) +
+            listOf("/usr/bin/eglinfo", "-B", "-p", "surfaceless"),
         environment = guestEnvironment(
             paths = paths,
             graphicsBridgeEnabled = true,
@@ -246,6 +273,7 @@ object ProotCommandFactory {
     const val CONSOLE_SESSION_GUEST_PATH = "/usr/local/bin/dex-session"
     const val SHARED_FOLDER_GUEST_PATH = "/root/shared"
     const val GUEST_TMP_GUEST_PATH = "/tmp"
+    const val CPUINFO_GUEST_PATH = "/proc/cpuinfo"
     const val VIRGL_SOCKET_GUEST_PATH = "/tmp/.virgl_test"
     const val NATIVE_X11_DISPLAY_NUMBER = 1
     const val NATIVE_X11_DISPLAY = ":$NATIVE_X11_DISPLAY_NUMBER"

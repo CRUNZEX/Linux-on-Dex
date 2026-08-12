@@ -43,6 +43,36 @@ class DesktopImageBuilderTest(unittest.TestCase):
         self.assertNotIn("Session=ubuntu-xorg", rendered)
         self.assertIn("DEX_DESKTOP_PROFILE_VALIDATED=gnome", rendered)
 
+    def test_both_desktops_draw_without_a_compositor(self) -> None:
+        xfce = builder._render_build_user_data(self.request("xfce"))
+        gnome = builder._render_build_user_data(self.request("gnome"))
+
+        self.assertIn('<property name="use_compositing" type="bool" value="false"/>', xfce)
+        self.assertIn("[org/gnome/metacity]", gnome)
+        self.assertIn("compositing-manager=false", gnome)
+
+    def test_no_desktop_ever_blanks_its_display(self) -> None:
+        for profile in ("xfce", "gnome"):
+            rendered = builder._render_build_user_data(self.request(profile))
+
+            self.assertIn("/etc/X11/xorg.conf.d/10-linux-on-dex-noblank.conf", rendered)
+            self.assertIn('Option "BlankTime" "0"', rendered)
+        xfce = builder._render_build_user_data(self.request("xfce"))
+        self.assertIn('<property name="dpms-enabled" type="bool" value="false"/>', xfce)
+
+    def test_fps_benchmark_ships_with_its_renderer(self) -> None:
+        for profile in ("xfce", "gnome"):
+            rendered = builder._render_build_user_data(self.request(profile))
+
+            self.assertIn("- mesa-utils", rendered)
+            self.assertIn("/usr/local/bin/dex-fps", rendered)
+            self.assertIn("test -x /usr/local/bin/dex-fps", rendered)
+            self.assertIn("test -x /usr/bin/glxgears", rendered)
+            # The script must survive the surrounding f-string: its shell
+            # expansions arrive with single braces, or the guest script breaks.
+            self.assertIn('SECONDS_TO_RUN="${1:-20}"', rendered)
+            self.assertNotIn("${{", rendered)
+
     def test_apt_keeps_current_lists_and_uses_bounded_fetches(self) -> None:
         rendered = builder._render_build_user_data(self.request("xfce"))
 

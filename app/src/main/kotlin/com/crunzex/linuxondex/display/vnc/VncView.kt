@@ -37,6 +37,27 @@ class VncView(context: Context) : View(context) {
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * Fill the whole view instead of letterboxing. Shares its preference key
+     * with the native X11 display so one setting rules both transports.
+     */
+    var stretchToFill: Boolean = false
+        set(enabled) {
+            if (field == enabled) return
+            field = enabled
+            updateDrawMatrix()
+            invalidate()
+        }
+
+    /** Bilinear filtering while scaling; off shows hard, unsmoothed pixels. */
+    var smoothScaling: Boolean = true
+        set(enabled) {
+            if (field == enabled) return
+            field = enabled
+            paint.isFilterBitmap = enabled
+            invalidate()
+        }
+
     private var currentButtonMask = 0
     private var lastPointerX = 0
     private var lastPointerY = 0
@@ -99,13 +120,16 @@ class VncView(context: Context) : View(context) {
     private fun updateDrawMatrix() {
         val bitmap = framebuffer ?: return
         if (width == 0 || height == 0) return
-        val scale = minOf(
-            width.toFloat() / bitmap.width,
-            height.toFloat() / bitmap.height,
+        val scales = VncViewGeometry.drawScales(
+            viewWidth = width,
+            viewHeight = height,
+            frameWidth = bitmap.width,
+            frameHeight = bitmap.height,
+            stretchToFill = stretchToFill,
         )
-        val offsetX = (width - bitmap.width * scale) / 2f
-        val offsetY = (height - bitmap.height * scale) / 2f
-        drawMatrix.setScale(scale, scale)
+        val offsetX = (width - bitmap.width * scales.scaleX) / 2f
+        val offsetY = (height - bitmap.height * scales.scaleY) / 2f
+        drawMatrix.setScale(scales.scaleX, scales.scaleY)
         drawMatrix.postTranslate(offsetX, offsetY)
         drawMatrix.invert(inverseDrawMatrix)
     }

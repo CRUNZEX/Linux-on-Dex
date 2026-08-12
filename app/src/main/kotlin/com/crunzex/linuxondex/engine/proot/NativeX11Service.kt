@@ -39,6 +39,13 @@ class NativeX11Service : Service() {
             // prepared this short directory so the path fits a sockaddr_un.
             Os.setenv("TMPDIR", guestTmpDir.absolutePath, true)
             Os.setenv("XKB_CONFIG_ROOT", xkbRoot.absolutePath, true)
+            // Allows Present flips of client-imported buffers: a presented
+            // frame then replaces the shared root buffer whole instead of
+            // being copied out of a buffer the client keeps drawing into —
+            // which is where animation tearing comes from.
+            if (intent.getBooleanExtra(EXTRA_FLIP_PRESENTATION, false)) {
+                Os.setenv("TERMUX_X11_FORCE_FLIP", "1", true)
+            }
             serverEntry = EmbeddedX11ServerEntry.start(
                 context = this,
                 arguments = arrayOf(":$displayNumber", "-nolisten", "tcp"),
@@ -103,6 +110,7 @@ class NativeX11Service : Service() {
         private const val EXTRA_ROOTFS_PATH = "rootfs_path"
         private const val EXTRA_GUEST_TMP_PATH = "guest_tmp_path"
         private const val EXTRA_DISPLAY_NUMBER = "display_number"
+        private const val EXTRA_FLIP_PRESENTATION = "flip_presentation"
         private const val INVALID_DISPLAY_NUMBER = -1
         private const val PROOT_IMAGES_RELATIVE_PATH = "vm/proot-images"
         private const val GUEST_TMP_RELATIVE_PATH = "vm/guest-tmp"
@@ -115,11 +123,13 @@ class NativeX11Service : Service() {
             rootfsDir: File,
             guestTmpDir: File,
             displayNumber: Int,
+            flipPresentation: Boolean,
         ): Intent =
             Intent(context, NativeX11Service::class.java)
                 .setAction(ACTION_BIND)
                 .putExtra(EXTRA_ROOTFS_PATH, rootfsDir.absolutePath)
                 .putExtra(EXTRA_GUEST_TMP_PATH, guestTmpDir.absolutePath)
                 .putExtra(EXTRA_DISPLAY_NUMBER, displayNumber)
+                .putExtra(EXTRA_FLIP_PRESENTATION, flipPresentation)
     }
 }

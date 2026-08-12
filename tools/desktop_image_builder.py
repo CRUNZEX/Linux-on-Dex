@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-RELEASE_VERSION = "1.1.12"
+RELEASE_VERSION = "1.3.0"
 
 
 @dataclass(frozen=True)
@@ -81,6 +81,9 @@ XFCE_PROFILE = DesktopProfile(
         "xserver-xorg-input-libinput",
         "x11-utils",
         "xdotool",
+        # glxgears and glxinfo, so desktop smoothness can be measured on the
+        # actual phone instead of estimated (see /usr/local/bin/dex-fps).
+        "mesa-utils",
         "network-manager",
     ),
     display_manager="lightdm",
@@ -109,7 +112,8 @@ XFCE_PROFILE = DesktopProfile(
       </channel>
   # No GPU in the VM: xfwm4's GL compositor would drag every frame through
   # software GL. Without compositing, windows draw directly — the single
-  # biggest smoothness win a software VM can get.
+  # biggest smoothness win a software VM can get. The shadow and vblank pins
+  # keep that choice intact if a user ever re-enables compositing.
   - path: /home/{username}/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml
     permissions: "0644"
     content: |
@@ -117,6 +121,25 @@ XFCE_PROFILE = DesktopProfile(
       <channel name="xfwm4" version="1.0">
         <property name="general" type="empty">
           <property name="use_compositing" type="bool" value="false"/>
+          <property name="show_frame_shadow" type="bool" value="false"/>
+          <property name="show_popup_shadow" type="bool" value="false"/>
+          <property name="show_dock_shadow" type="bool" value="false"/>
+          <property name="vblank_mode" type="string" value="off"/>
+        </property>
+      </channel>
+  # A phone VM has no monitor to power down: DPMS just blanks the VNC view,
+  # which looks exactly like a hang. Xorg-level blanking is disabled in the
+  # shared no-blank drop-in; this stops xfce4-power-manager re-enabling it.
+  - path: /home/{username}/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml
+    permissions: "0644"
+    content: |
+      <?xml version="1.0" encoding="UTF-8"?>
+      <channel name="xfce4-power-manager" version="1.0">
+        <property name="xfce4-power-manager" type="empty">
+          <property name="dpms-enabled" type="bool" value="false"/>
+          <property name="blank-on-ac" type="int" value="0"/>
+          <property name="dpms-on-ac-sleep" type="uint" value="0"/>
+          <property name="dpms-on-ac-off" type="uint" value="0"/>
         </property>
       </channel>
 """,
@@ -154,6 +177,9 @@ GNOME_PROFILE = DesktopProfile(
         "x11-utils",
         "xdotool",
         "dbus-x11",
+        # glxgears and glxinfo, so desktop smoothness can be measured on the
+        # actual phone instead of estimated (see /usr/local/bin/dex-fps).
+        "mesa-utils",
         "network-manager",
         "fonts-ubuntu",
         # Ubuntu's default-settings package. Without it GNOME points at a
@@ -209,6 +235,12 @@ GNOME_PROFILE = DesktopProfile(
       primary-color='#242430'
       [org/gnome/desktop/search-providers]
       disable-external=true
+      # Same lever as XFCE's use_compositing=false, and it was measured:
+      # window drags under a software compositor paint ~0.1 updates/s over
+      # VNC (freeze-then-jump), without one ~22/s. Metacity draws windows
+      # directly when its compositor is off.
+      [org/gnome/metacity]
+      compositing-manager=false
 """,
     extra_runcmd="""  - [dconf, update]
   # File-indexing miners are pure overhead on a phone VM.
@@ -226,6 +258,59 @@ GNOME_PROFILE = DesktopProfile(
 )
 
 DESKTOP_PROFILES = {profile.key: profile for profile in (XFCE_PROFILE, GNOME_PROFILE)}
+
+# Same purpose as the PRoot images' dex-fps, adapted to a QEMU desktop: the
+# session lives on DISPLAY :0 under a display manager, so the script borrows
+# the running session's environment instead of assuming the app's DISPLAY=:1.
+FPS_BENCHMARK_SCRIPT = r"""#!/bin/sh
+# Measures what this desktop can actually draw, on this device.
+#
+# Run it from a terminal on the desktop, or from the app's own Terminal —
+# it borrows the running session's display and X authority, so it works
+# either way. glxgears prints a frame rate every five seconds; the renderer
+# line above it says what is doing the drawing (llvmpipe: the CPU, because
+# a stock phone gives the VM no GPU).
+set -u
+
+SECONDS_TO_RUN="${1:-20}"
+
+# -f matches the full command line: a process's short name is truncated to
+# 15 characters by the kernel, so "gnome-session-binary" is unmatchable by
+# name alone.
+for SESSION_PROCESS in xfce4-session gnome-session-binary; do
+    SESSION_PID=$(pgrep -f "$SESSION_PROCESS" | head -1)
+    if [ -n "$SESSION_PID" ] && [ -r "/proc/$SESSION_PID/environ" ]; then
+        for NAME in DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS; do
+            LINE=$(tr '\0' '\n' < "/proc/$SESSION_PID/environ" | grep "^$NAME=" || true)
+            [ -n "$LINE" ] && export "$LINE"
+        done
+        break
+    fi
+done
+export DISPLAY="${DISPLAY:-:0}"
+
+if ! command -v glxgears >/dev/null; then
+    echo "glxgears is not installed (expected from mesa-utils)"
+    exit 1
+fi
+
+echo "display:  $DISPLAY"
+glxinfo -B 2>/dev/null | grep -E 'OpenGL renderer|OpenGL version' || \
+    echo "renderer: unknown (glxinfo unavailable)"
+echo "running glxgears for ${SECONDS_TO_RUN}s — each line is a measured frame rate"
+echo
+# vblank_mode=0 stops the driver capping at the display's refresh rate, so
+# the number reflects what the machine can draw rather than what it waits for.
+vblank_mode=0 timeout "$SECONDS_TO_RUN" glxgears -geometry 800x600 2>&1 |
+    grep --line-buffered -E 'frames in|FPS'
+echo
+echo "done — the last figures are the steady-state frame rate"
+"""
+
+
+def _indent_for_write_files(body: str) -> str:
+    """Indents a file body to sit under a write_files `content: |` block."""
+    return "\n".join(f"      {line}".rstrip() for line in body.strip("\n").splitlines())
 
 # A bake seed must never reuse an instance id: cloud-image caches can retain
 # cloud-init state, and a repeated id makes a rebuild silently skip its whole
@@ -298,6 +383,10 @@ def _render_build_user_data(request: DesktopBuildRequest) -> str:
     # Profile fragments carry {username} placeholders; fill them before use.
     profile_write_files = profile.extra_write_files.format(username=username)
     profile_runcmd = profile.extra_runcmd.format(username=username)
+    # Kept out of the f-string below: the script's ${…} shell expansions would
+    # otherwise all need doubled braces, which is exactly how builder scripts
+    # get corrupted during later edits.
+    fps_benchmark = _indent_for_write_files(FPS_BENCHMARK_SCRIPT)
     return f"""#cloud-config
 hostname: dex
 manage_etc_hosts: true
@@ -341,6 +430,24 @@ write_files:
       LP_NUM_THREADS=4
       GSK_RENDERER=cairo
       QT_XCB_GL_INTEGRATION=none
+  # An X server blanks its screen after ~10 idle minutes. There is no real
+  # monitor to save — only the VNC view, and a blanked VNC view looks like a
+  # hang. GNOME's own idle-delay and XFCE's power manager are pinned off in
+  # their profiles; this covers the X server itself for both.
+  - path: /etc/X11/xorg.conf.d/10-linux-on-dex-noblank.conf
+    permissions: "0644"
+    content: |
+      Section "ServerFlags"
+          Option "BlankTime" "0"
+          Option "StandbyTime" "0"
+          Option "SuspendTime" "0"
+          Option "OffTime" "0"
+      EndSection
+  # Measures what the desktop can actually draw, on this device.
+  - path: /usr/local/bin/dex-fps
+    permissions: "0755"
+    content: |
+{fps_benchmark}
   # Keep package downloads bounded and avoid translated indexes that are not
   # used by this English-only appliance image.
   - path: /etc/apt/apt.conf.d/99-linux-on-dex
@@ -442,6 +549,9 @@ runcmd:
     test -f /etc/linux-on-dex-release
     test -f /etc/environment.d/90-linux-on-dex-render.conf
     test -f /etc/apt/apt.conf.d/99-linux-on-dex
+    test -f /etc/X11/xorg.conf.d/10-linux-on-dex-noblank.conf
+    test -x /usr/local/bin/dex-fps
+    test -x /usr/bin/glxgears
     test -f /etc/systemd/system/serial-getty@ttyAMA0.service.d/autologin.conf
     test -f /etc/systemd/system/serial-getty@hvc0.service.d/autologin.conf
     test -f /etc/systemd/system/serial-getty@hvc1.service.d/autologin.conf

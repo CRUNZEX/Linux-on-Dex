@@ -34,7 +34,7 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
-RELEASE_VERSION = "1.3.0-beta5"
+RELEASE_VERSION = "1.3.0-beta7"
 
 
 @dataclass(frozen=True)
@@ -608,11 +608,17 @@ export GDMSESSION=gnome-xorg
 # black root window. `dex-gpu <command>` remains available for explicit native
 # acceleration without putting the session leader on that failure domain.
 export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=llvmpipe
+# The app selects the renderer: llvmpipe by default, softpipe as the last
+# rung of its SIGILL-fallback ladder (DEX_RENDERER=softpipe). Anything else
+# would run code no one asked for.
+case "${DEX_RENDERER:-llvmpipe}" in
+    softpipe) export GALLIUM_DRIVER=softpipe ;;
+    *)        export GALLIUM_DRIVER=llvmpipe ;;
+esac
 if [ "${DEX_GPU_BRIDGE:-0}" = 1 ]; then
-    log "stable llvmpipe compositor; native virgl available through dex-gpu"
+    log "stable $GALLIUM_DRIVER compositor; native virgl available through dex-gpu"
 else
-    log "native GPU bridge unavailable; using llvmpipe"
+    log "native GPU bridge unavailable; using $GALLIUM_DRIVER"
 fi
 export GSK_RENDERER=cairo
 # Every avoidable helper process matters: Android kills the whole tree once
@@ -683,7 +689,15 @@ log "starting the native GNOME Shell X11 session"
 # phantom child. Restarting just the desktop session preserves X11, SSH, open
 # terminal connections and the extracted rootfs instead of taking the entire
 # PRoot container down with one component.
-restart_attempt=0
+# A session that keeps dying seconds after it starts will not heal by being
+# restarted a hundred more times: after this many consecutive fast deaths
+# the supervisor exits with GNOME's own code, so the app can react — its
+# renderer-fallback ladder treats SIGILL (132) by rebooting the session with
+# a more compatible renderer.
+MAX_CONSECUTIVE_FAST_CRASHES=4
+FAST_CRASH_SECONDS=60
+
+consecutive_fast_crashes=0
 while [ -S /tmp/.X11-unix/X1 ]; do
     session_started_at=$(date +%s)
     dbus-run-session -- sh -c '\
@@ -706,12 +720,16 @@ while [ -S /tmp/.X11-unix/X1 ]; do
     fi
 
     session_runtime=$(( $(date +%s) - session_started_at ))
-    if [ "$session_runtime" -ge 60 ]; then
-        restart_attempt=1
+    if [ "$session_runtime" -ge "$FAST_CRASH_SECONDS" ]; then
+        consecutive_fast_crashes=1
     else
-        restart_attempt=$((restart_attempt + 1))
+        consecutive_fast_crashes=$((consecutive_fast_crashes + 1))
     fi
-    restart_delay=$restart_attempt
+    if [ "$consecutive_fast_crashes" -ge "$MAX_CONSECUTIVE_FAST_CRASHES" ]; then
+        log "GNOME died $consecutive_fast_crashes times within ${FAST_CRASH_SECONDS}s each (last exit $session_exit_code); giving up so the app can change strategy"
+        exit "$session_exit_code"
+    fi
+    restart_delay=$consecutive_fast_crashes
     if [ "$restart_delay" -gt 3 ]; then restart_delay=3; fi
     log "GNOME exited with code $session_exit_code; restarting in ${restart_delay}s"
     sleep "$restart_delay"

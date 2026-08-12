@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import com.crunzex.linuxondex.core.LxdError
+import com.crunzex.linuxondex.display.settings.DisplaySessionPreferences
 import com.crunzex.linuxondex.engine.runtime.VmPaths
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -79,9 +80,18 @@ class AppManagedNativeX11Server(
             serviceBinder = null
         }
 
+        // Presentation mode is process-wide native state, so it can only be
+        // chosen here, before the server process starts.
+        val flipPresentation = DisplaySessionPreferences(appContext).preventTearing
         val bound = runCatching {
             appContext.bindService(
-                NativeX11Service.bindingIntent(appContext, rootfsDir, guestTmpDir, displayNumber),
+                NativeX11Service.bindingIntent(
+                    context = appContext,
+                    rootfsDir = rootfsDir,
+                    guestTmpDir = guestTmpDir,
+                    displayNumber = displayNumber,
+                    flipPresentation = flipPresentation,
+                ),
                 connection,
                 Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT,
             )

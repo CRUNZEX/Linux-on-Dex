@@ -21,7 +21,24 @@ internal class ProotRecoveryPolicy(
         return retryDelaysMillis.getOrNull(consumedAttempts++)
     }
 
+    /**
+     * Refills the budget once a recovered session proves healthy. Without
+     * this a service process that lives for weeks would spend its attempts
+     * one unrelated crash at a time and eventually refuse to recover at
+     * all. Deliberately NOT called on every Running edge: the renderer
+     * ladder needs consecutive quick crashes to share one budget, so the
+     * caller only reports health after a sustained run.
+     */
+    fun noteSessionStayedHealthy() {
+        consumedAttempts = 0
+    }
+
     companion object {
-        private val DEFAULT_RETRY_DELAYS_MILLIS = listOf(1_000L, 3_000L)
+        /**
+         * Three attempts: the SIGILL renderer ladder consumes up to two
+         * (native → portable CPU → failsafe), leaving one for an ordinary
+         * transient crash on top.
+         */
+        private val DEFAULT_RETRY_DELAYS_MILLIS = listOf(1_000L, 3_000L, 5_000L)
     }
 }

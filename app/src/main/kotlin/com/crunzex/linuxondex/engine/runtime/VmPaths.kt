@@ -79,6 +79,12 @@ class VmPaths(
 
     val socketsDir: File = vmRootDir.resolve("sockets")
     val virglSocket: File = socketsDir.resolve("virgl-renderer.sock")
+
+    /** Curated cpuinfo bound over /proc/cpuinfo when a JIT needs taming. */
+    val portableCpuinfoFile: File = vmRootDir.resolve("portable-cpuinfo")
+
+    /** Which renderer stage the desktop should use; survives restarts. */
+    val rendererStageFile: File = vmRootDir.resolve("renderer-stage")
     val logsDir: File = vmRootDir.resolve("logs")
     val tmpDir: File = cacheDir.resolve("vm-tmp")
 
