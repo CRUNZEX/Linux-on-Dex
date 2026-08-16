@@ -3,6 +3,7 @@ package com.crunzex.linuxondex.engine.proot
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,6 +38,22 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration
 
 /**
+ * When the engine may hand the *whole desktop* to the Android GPU bridge.
+ *
+ * [HARDWARE_BACKED_ONLY] is the shipped behaviour: a bridge whose renderer
+ * string reveals a software rasterizer (the emulator's ANGLE ends up on CPU
+ * lavapipe, for example) is worse than local llvmpipe — every frame would
+ * pay the vtest socket on top of CPU rendering — so it is rejected outright.
+ * [ANY_WORKING_RENDERER] exists for pipeline verification on emulators,
+ * where no hardware-backed EGL is available at all; it must never be the
+ * default.
+ */
+enum class GraphicsBridgePolicy {
+    HARDWARE_BACKED_ONLY,
+    ANY_WORKING_RENDERER,
+}
+
+/**
  * Runs Linux through PRoot's syscall translation: no VM and no guest kernel,
  * which means **native CPU speed** — the property that makes a graphical
  * desktop usable on devices where /dev/kvm is denied and QEMU must emulate.
@@ -58,6 +75,15 @@ class ProotEngine(
     private val rootfsInstaller: RootfsImageInstaller = RootfsImageInstaller(paths),
     private val reaper: GuestProcessReaper = GuestProcessReaper(paths),
     private val graphicsBridge: AndroidVirglBridge = AndroidVirglBridge(paths),
+    /** The user's "GPU-accelerated desktop" setting, read fresh per boot. */
+    private val desktopGpuPreference: () -> Boolean = { true },
+    private val bridgePolicy: GraphicsBridgePolicy = GraphicsBridgePolicy.HARDWARE_BACKED_ONLY,
+    /**
+     * Invoked once the session /tmp exists, so app layers can drop their
+     * markers into it before the supervisor starts — e.g. the viewer's
+     * "already attached" marker that skips the GPU session's viewer wait.
+     */
+    private val onGuestTmpPrepared: () -> Unit = {},
 ) : VirtualizationEngine {
 
     override val kind: EngineKind = EngineKind.PROOT
@@ -77,6 +103,9 @@ class ProotEngine(
 
     /** True only after the native renderer has published its Unix socket. */
     private var graphicsBridgeEnabled = false
+
+    /** What the running desktop session actually renders with. */
+    private var activeRendererStage: RendererStage? = null
 
     /** Terminal shells spawned for the desktop mode, killed on stop. */
     private val consoleShells = CopyOnWriteArrayList<ConsoleShellProcess>()
@@ -134,12 +163,40 @@ class ProotEngine(
      */
     private fun startRootfsImageLocked(config: VmConfig, image: PreparedImageConfig) {
         val rootfsDir = extractImageReportingProgress(File(image.diskImagePath))
+        // The previous session may have left a renderer verdict in its /tmp;
+        // it must be read before the wipe below destroys it.
+        consumeGpuDesktopFailureMarker(rootfsDir)
         prepareGuestTmpDir()
+        onGuestTmpPrepared()
         if (rootfsDir.resolve(DESKTOP_SUPERVISOR_RELATIVE_PATH).exists()) {
             startDesktopSessionLocked(config, rootfsDir)
         } else {
             startConsoleSessionLocked(rootfsDir)
         }
+    }
+
+    /**
+     * The supervisor abandons virpipe *inside* a session when GNOME cannot
+     * hold a GPU-rendered desktop up, and marks that verdict in the session
+     * /tmp. The session itself then continues on llvmpipe — often for hours
+     * — so the app only learns about the downgrade here, at the next start,
+     * and makes it sticky so later boots skip the doomed attempt.
+     */
+    private fun consumeGpuDesktopFailureMarker(rootfsDir: File) {
+        val marker = paths.prootGuestTmpDir.resolve(GPU_DESKTOP_FAILURE_MARKER_NAME)
+        if (!marker.exists()) return
+        marker.delete()
+        // The session /tmp is wiped a moment after this, taking the crash
+        // context with it — capture the compositor's last words first.
+        AppLog.info(
+            SCOPE,
+            "guest GNOME log from the abandoned GPU session: ${readGuestCompositorLogTail()}",
+        )
+        val next = rendererLadderFor(rootfsDir).stepDownFromGpuStage() ?: return
+        AppLog.warn(
+            SCOPE,
+            "last session abandoned the GPU desktop mid-run; staying on ${next.describe()}",
+        )
     }
 
     /**
@@ -189,8 +246,10 @@ class ProotEngine(
 
     private fun startDesktopSessionLocked(config: VmConfig, rootfsDir: File) {
         prepareSharedMemoryDir()
-        val rendererStage = prepareRendererStage(rootfsDir)
-        graphicsBridgeEnabled = startVerifiedGraphicsBridge(rootfsDir, rendererStage)
+        val stickyStage = prepareRendererStage(rootfsDir)
+        graphicsBridgeEnabled = startVerifiedGraphicsBridge(rootfsDir, stickyStage)
+        val rendererStage = resolveBootRendererStage(stickyStage)
+        activeRendererStage = rendererStage
         val displayBackend = displayBackendFor(rootfsDir)
 
         _state.value = VmState.Starting(kind)
@@ -235,8 +294,8 @@ class ProotEngine(
 
     /**
      * Chooses the renderer for this boot and makes its prerequisites real:
-     * the sticky ladder remembers a SIGILL-driven downgrade per image, and
-     * any stage past NATIVE needs the curated cpuinfo on disk before PRoot
+     * the sticky ladder remembers a crash-driven downgrade per image, and
+     * the portable-CPU stages need the curated cpuinfo on disk before PRoot
      * can bind it over /proc/cpuinfo.
      */
     private fun prepareRendererStage(rootfsDir: File): RendererStage {
@@ -244,10 +303,26 @@ class ProotEngine(
         if (stage.usesPortableCpuProfile) {
             writePortableCpuProfile()
         }
-        if (stage != RendererStage.NATIVE) {
-            AppLog.info(SCOPE, "desktop renderer: ${stage.describe()} (sticky after SIGILL)")
+        if (stage != RendererStage.GPU_VIRGL) {
+            AppLog.info(SCOPE, "desktop renderer: ${stage.describe()} (sticky after a crash)")
         }
         return stage
+    }
+
+    /**
+     * The GPU rung is the only one with boot-time preconditions: the user
+     * must want it and this boot's bridge must have passed verification.
+     * Falling short skips the rung for this session without writing the
+     * ladder — a bridge hiccup today says nothing about tomorrow, and the
+     * setting can simply be turned back on.
+     */
+    private fun resolveBootRendererStage(stickyStage: RendererStage): RendererStage {
+        if (!stickyStage.usesGpuBridgeRenderer) return stickyStage
+        val wanted = desktopGpuPreference()
+        if (wanted && graphicsBridgeEnabled) return stickyStage
+        val reason = if (wanted) "the bridge failed verification" else "disabled in settings"
+        AppLog.info(SCOPE, "GPU desktop skipped this boot ($reason); using llvmpipe")
+        return RendererStage.NATIVE
     }
 
     private fun rendererLadderFor(rootfsDir: File): RendererFallbackLadder =
@@ -341,6 +416,11 @@ class ProotEngine(
      * lazily and fail only when the first guest context arrives. Probe the
      * complete path before exporting virpipe to the desktop, trying Samsung's
      * system EGL first and bundled ANGLE as the compatibility fallback.
+     *
+     * A backend that answers but reveals a software rasterizer behind the
+     * bridge is only accepted under [GraphicsBridgePolicy.ANY_WORKING_RENDERER]
+     * — paying the vtest socket on top of CPU rendering is strictly worse
+     * than plain llvmpipe, so production rejects it.
      */
     private fun startVerifiedGraphicsBridge(
         rootfsDir: File,
@@ -364,16 +444,20 @@ class ProotEngine(
             }
             val probe = probeResult.getOrThrow()
             val reachedVirgl = probe.isSuccess &&
-                probe.output.contains("virgl", ignoreCase = true) &&
-                !probe.output.contains("llvmpipe", ignoreCase = true)
-            if (reachedVirgl && graphicsBridge.isRunning) {
-                AppLog.info(SCOPE, "guest Mesa verified through ${backend.displayName}")
+                probe.output.contains("virgl", ignoreCase = true)
+            val hardwareBacked = reachedVirgl &&
+                SOFTWARE_RENDERER_MARKERS.none { probe.output.contains(it, ignoreCase = true) }
+            val accepted = reachedVirgl &&
+                (hardwareBacked || bridgePolicy == GraphicsBridgePolicy.ANY_WORKING_RENDERER)
+            if (accepted && graphicsBridge.isRunning) {
+                val quality = if (hardwareBacked) "device GPU" else "software-backed (verification)"
+                AppLog.info(SCOPE, "guest Mesa verified through ${backend.displayName} — $quality")
                 return true
             }
 
             AppLog.warn(
                 SCOPE,
-                "${backend.displayName} did not produce a virgl renderer: " +
+                "${backend.displayName} did not produce a usable renderer: " +
                     probe.output.takeLast(GRAPHICS_PROBE_LOG_CHARS),
             )
             graphicsBridge.stop()
@@ -542,12 +626,14 @@ class ProotEngine(
             if (shutdownInitiated.get()) return@launch // stop() owns the state
             if (!_state.value.isRunning) return@launch // startup failures report themselves
             if (isDesktopSession && exitCode != 0) {
-                recordRendererFallbackAfterCrash(exitCode)
+                val ranStage = activeRendererStage
+                recordRendererFallbackAfterCrash(exitCode, ranStage)
                 _state.value = VmState.Failed(
                     LxdError.BootFailed(
                         "the desktop session ended unexpectedly (exit $exitCode). " +
-                            diagnoseSessionDeath(exitCode) +
-                            readLogTail(desktopLogFile())
+                            diagnoseSessionDeath(exitCode, ranStage) +
+                            readLogTail(desktopLogFile()) +
+                            "\nGNOME log: " + readGuestCompositorLogTail()
                     )
                 )
             } else {
@@ -570,6 +656,7 @@ class ProotEngine(
         nativeX11Server.stop()
         graphicsBridge.stop()
         graphicsBridgeEnabled = false
+        activeRendererStage = null
         sessionProcess = null
         activeRootfsDir = null
     }
@@ -623,9 +710,11 @@ class ProotEngine(
                     rootfsDir = rootfsDir,
                     sharedFolderDir = paths.sharedFolderDir,
                     graphicsBridgeEnabled = graphicsBridgeEnabled && graphicsBridge.isRunning,
-                    // GUI programs launched from a terminal JIT-compile like
-                    // the desktop does; they need the same safe CPU profile.
-                    rendererStage = rendererLadderFor(rootfsDir).currentStage(),
+                    // GUI programs launched from a terminal should render
+                    // exactly like the desktop: same GPU selection, same
+                    // safe CPU profile for their JITs.
+                    rendererStage = activeRendererStage
+                        ?: rendererLadderFor(rootfsDir).currentStage(),
                 )
                 .startTracked(processIdFile, redirectErrorStream = true)
             val shell = ConsoleShellProcess(
@@ -660,6 +749,7 @@ class ProotEngine(
                         sink.appendLine(line)
                         sink.flush()
                         AppLog.debug(SCOPE, "$source: $line")
+                        reactToSupervisorSignal(line)
                     }
                 }
             } catch (_: Exception) {
@@ -667,6 +757,57 @@ class ProotEngine(
             }
         }
     }
+
+    /**
+     * The supervisor restarts a crashed GNOME itself, so the session stays
+     * Running and these log lines are the app's only notification. Two
+     * matter: a compositor restart (the viewer may be showing the dead
+     * compositor's last buffer — a black or frozen screen — until it
+     * re-imports), and a GPU abandonment (whose crash context would be
+     * wiped with the session /tmp before anyone could read it).
+     */
+    private fun reactToSupervisorSignal(line: String) {
+        when (val signal = DesktopSessionSignal.fromSupervisorLine(line)) {
+            is DesktopSessionSignal.CompositorRestarting ->
+                refreshViewerAfterCompositorRestart(signal.exitCode)
+            is DesktopSessionSignal.GpuDesktopAbandoned ->
+                AppLog.warn(
+                    SCOPE,
+                    "GPU desktop abandoned in-session (${signal.reason}); " +
+                        "guest GNOME log tail: ${readGuestCompositorLogTail()}",
+                )
+            null -> Unit
+        }
+    }
+
+    private fun refreshViewerAfterCompositorRestart(exitCode: Int?) {
+        AppLog.info(
+            SCOPE,
+            "compositor restarting (exit ${exitCode ?: "?"}); refreshing the viewer",
+        )
+        engineScope.launch {
+            // Give the replacement compositor a moment to come up first; the
+            // refresh then lands on a desktop that is already painting.
+            delay(VIEWER_REFRESH_AFTER_RESTART_MILLIS)
+            if (!shutdownInitiated.get() && _state.value.isRunning) {
+                nativeX11Server.requestViewerRefresh()
+            }
+        }
+    }
+
+    /**
+     * The compositor's own log, written by the supervisor into the session
+     * /tmp — which is a host directory, so it stays readable after crashes
+     * and even after the whole session died.
+     */
+    private fun readGuestCompositorLogTail(): String = runCatching {
+        val logFile = paths.prootGuestTmpDir.resolve(GUEST_COMPOSITOR_LOG_NAME)
+        if (!logFile.isFile) return@runCatching "(no gnome-shell.log)"
+        val bytes = logFile.readBytes()
+        String(bytes.copyOfRange((bytes.size - GUEST_LOG_TAIL_BYTES).coerceAtLeast(0), bytes.size))
+            .trim()
+            .ifEmpty { "(gnome-shell.log is empty)" }
+    }.getOrElse { error -> "(gnome-shell.log unreadable: ${error.message})" }
 
     /**
      * Names the cause when the exit code is one Android produces itself.
@@ -677,13 +818,17 @@ class ProotEngine(
      * the session disappears with no error of its own. Saying so beats
      * showing a log tail full of unrelated GNOME warnings.
      */
-    private fun diagnoseSessionDeath(exitCode: Int): String = when (exitCode) {
-        EXIT_CODE_SIGKILL -> "Android stopped the session's processes — this happens " +
+    private fun diagnoseSessionDeath(exitCode: Int, ranStage: RendererStage?): String = when {
+        exitCode == EXIT_CODE_SIGKILL -> "Android stopped the session's processes — this happens " +
             "when the desktop runs more background programs than Android allows an " +
             "app to keep (its phantom-process limit). Close other apps and start " +
             "again, or use an image built for this limit. Log: "
-        EXIT_CODE_SIGTERM -> "Android or the system asked the session to stop. Log: "
-        RendererFallbackLadder.EXIT_CODE_ILLEGAL_INSTRUCTION ->
+        exitCode == EXIT_CODE_SIGTERM -> "Android or the system asked the session to stop. Log: "
+        ranStage?.usesGpuBridgeRenderer == true ->
+            "The GPU-accelerated desktop failed on this device. The next " +
+                "start uses the standard renderer automatically — start " +
+                "Linux again. Log: "
+        exitCode == RendererFallbackLadder.EXIT_CODE_ILLEGAL_INSTRUCTION ->
             "A desktop program used a CPU instruction this device does not " +
                 "support. The next start uses a more compatible renderer " +
                 "automatically — start Linux again. Log: "
@@ -691,17 +836,20 @@ class ProotEngine(
     }
 
     /**
-     * SIGILL means llvmpipe compiled code this SoC cannot run; remember to
-     * boot the next session one rung down the renderer ladder. The restart
-     * itself is the service's job — this only has to make the next attempt
-     * different from the one that just died.
+     * A fatal desktop death may demand a different renderer next time: any
+     * fatal exit abandons the GPU rung, SIGILL walks the CPU rungs. The
+     * restart itself is the service's job — this only has to make the next
+     * attempt different from the one that just died.
      */
-    private fun recordRendererFallbackAfterCrash(exitCode: Int) {
+    private fun recordRendererFallbackAfterCrash(exitCode: Int, ranStage: RendererStage?) {
         val rootfsDir = activeRootfsDir ?: return
-        val nextStage = rendererLadderFor(rootfsDir).advanceAfterExit(exitCode) ?: return
+        val ladder = rendererLadderFor(rootfsDir)
+        val nextStage = ladder
+            .advanceAfterExit(exitCode, ranStage ?: ladder.currentStage())
+            ?: return
         AppLog.warn(
             SCOPE,
-            "desktop died with SIGILL; next start uses ${nextStage.describe()}",
+            "desktop died (exit $exitCode); next start uses ${nextStage.describe()}",
         )
     }
 
@@ -780,6 +928,26 @@ class ProotEngine(
         private const val NATIVE_X11_MARKER = "native-x11"
         private const val XKB_CONFIG_ROOT_RELATIVE_PATH = "usr/share/X11/xkb"
         private const val X11_SOCKET_DIR_NAME = ".X11-unix"
+
+        /**
+         * Written by dex-desktop (as /tmp/<name>) when it abandons virpipe
+         * mid-session; the path is protocol shared with the rootfs builder.
+         */
+        private const val GPU_DESKTOP_FAILURE_MARKER_NAME = ".dex-gpu-desktop-failed"
+
+        /** The supervisor redirects GNOME's output here (guest /tmp). */
+        private const val GUEST_COMPOSITOR_LOG_NAME = "gnome-shell.log"
+        private const val GUEST_LOG_TAIL_BYTES = 1_500
+
+        /** Lets the replacement compositor come up before the viewer refresh. */
+        private const val VIEWER_REFRESH_AFTER_RESTART_MILLIS = 3_000L
+
+        /**
+         * Renderer strings that reveal CPU rasterization behind the bridge:
+         * Mesa's GL and Vulkan software drivers, and ANGLE's own fallback.
+         */
+        private val SOFTWARE_RENDERER_MARKERS =
+            listOf("llvmpipe", "lavapipe", "softpipe", "swiftshader")
 
         /** 01777 — /tmp semantics (sticky + rwx for everyone). */
         private val WORLD_WRITABLE_STICKY_MODE =

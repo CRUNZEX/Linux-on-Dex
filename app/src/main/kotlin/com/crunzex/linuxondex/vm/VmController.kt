@@ -46,6 +46,10 @@ class VmController(
     private val repository: VmRepository,
     private val preparedImages: PreparedImageRepository,
     private val usbPassthroughManager: UsbPassthroughManager? = null,
+    /** The "GPU-accelerated desktop" setting, read fresh at each boot. */
+    private val desktopGpuPreference: () -> Boolean = { true },
+    /** Lets app layers mark a fresh session /tmp before the guest starts. */
+    private val onGuestTmpPrepared: () -> Unit = {},
 ) {
     private val controllerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val lifecycleMutex = Mutex()
@@ -287,7 +291,13 @@ class VmController(
         EngineKind.QEMU_TCG ->
             qemuEngine(QemuAccelerator.TCG)
         EngineKind.PROOT ->
-            ProotEngine(paths, payloadInstaller, nativeX11Server)
+            ProotEngine(
+                paths = paths,
+                payloadInstaller = payloadInstaller,
+                nativeX11Server = nativeX11Server,
+                desktopGpuPreference = desktopGpuPreference,
+                onGuestTmpPrepared = onGuestTmpPrepared,
+            )
     }
 
     private fun qemuEngine(accelerator: QemuAccelerator): QemuVmEngine =

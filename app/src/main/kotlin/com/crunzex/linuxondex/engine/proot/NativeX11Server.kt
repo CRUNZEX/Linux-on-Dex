@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
+import com.crunzex.linuxondex.core.AppLog
 import com.crunzex.linuxondex.core.LxdError
 import com.crunzex.linuxondex.display.settings.DisplaySessionPreferences
 import com.crunzex.linuxondex.engine.runtime.VmPaths
@@ -23,6 +24,15 @@ interface NativeX11Server {
     fun isAlive(): Boolean
     fun diagnosticStatus(): String
     fun stop()
+
+    /**
+     * Asks the X server to re-announce itself to any open viewer, which
+     * responds by re-importing its buffers. Needed after the guest
+     * compositor dies mid-frame: the last presented buffer belonged to the
+     * dead process, and a viewer that keeps showing it looks like a black
+     * or frozen screen even though the restarted desktop is fine.
+     */
+    fun requestViewerRefresh()
 }
 
 /**
@@ -139,6 +149,20 @@ class AppManagedNativeX11Server(
         activeConnection?.let(::stopConnection)
     }
 
+    /**
+     * Uses the viewer's own native handshake: it connects to the server's
+     * local control socket, which answers by re-broadcasting the connection
+     * intent with its binder — the same sequence a freshly opened viewer
+     * performs, so an already-open viewer re-imports its buffers.
+     */
+    override fun requestViewerRefresh() {
+        if (!isAlive()) return
+        runCatching { com.termux.x11.LorieView.requestConnection() }
+            .onFailure { error ->
+                AppLog.warn(SCOPE, "viewer refresh request failed", error)
+            }
+    }
+
     private fun stopConnection(connection: ServiceConnection) {
         val shouldUnbind = synchronized(connectionLock) {
             if (activeConnection !== connection) {
@@ -165,6 +189,7 @@ class AppManagedNativeX11Server(
         get() = paths.logsDir.resolve(NativeX11Service.STATUS_FILE_NAME)
 
     private companion object {
+        const val SCOPE = "AppManagedNativeX11Server"
         const val SERVICE_CONNECTION_TIMEOUT_SECONDS = 10L
     }
 }

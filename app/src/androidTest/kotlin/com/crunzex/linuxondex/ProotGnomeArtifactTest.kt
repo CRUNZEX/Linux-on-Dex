@@ -66,6 +66,12 @@ class ProotGnomeArtifactTest {
 
         engine.start(config)
         try {
+            // GPU sessions hold GNOME until a viewer attaches; this headless
+            // gate stands in for the viewer with the marker the app writes.
+            InstrumentationRegistry.getInstrumentation().targetContext
+                .let { VmPaths(it).prootGuestTmpDir }
+                .resolve(VIEWER_ATTACHED_MARKER_NAME)
+                .writeText("")
             assertTrue("GNOME PRoot engine should be running", engine.state.value is VmState.Running)
             assertTrue(
                 "GNOME rootfs should use native X11",
@@ -226,6 +232,7 @@ class ProotGnomeArtifactTest {
     companion object {
         private const val ROOTFS_ARCHIVE_NAME =
             "linux-on-dex-ubuntu-24.04-proot-gnome-arm64.rootfs.tar.gz"
+        private const val VIEWER_ATTACHED_MARKER_NAME = ".dex-viewer-attached"
         private const val CONSOLE_TIMEOUT_MILLIS = 30_000L
         private const val CONSOLE_STARTUP_MILLIS = 1_500L
         private const val CONSOLE_RESPONSE_SETTLE_MILLIS = 100L

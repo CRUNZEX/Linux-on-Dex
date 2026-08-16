@@ -135,6 +135,18 @@ class ProotCommandFactoryTest {
             rendererStage = stage,
         )
 
+        val gpu = sessionAt(RendererStage.GPU_VIRGL)
+        assertFalse(
+            "the GPU stage runs no JIT rasterizer; faking cpuinfo would only " +
+                "slow other JITs down",
+            gpu.arguments.contains(cpuinfoBind),
+        )
+        assertEquals("virpipe", gpu.environment["DEX_RENDERER"])
+        assertNull(
+            "the supervisor owns the session's GL variables",
+            gpu.environment["GALLIUM_DRIVER"],
+        )
+
         val native = sessionAt(RendererStage.NATIVE)
         assertFalse(native.arguments.contains(cpuinfoBind))
         assertNull(native.environment["DEX_RENDERER"])
@@ -247,7 +259,11 @@ class ProotCommandFactoryTest {
         assertEquals("1", command.environment["DEX_GPU_BRIDGE"])
         assertEquals("virpipe", command.environment["GALLIUM_DRIVER"])
         assertEquals("1", command.environment["LIBGL_ALWAYS_SOFTWARE"])
-        assertEquals("3.3", command.environment["MESA_GL_VERSION_OVERRIDE"])
+        assertNull(
+            "no forced GL version: lying about a GLES bridge's capabilities " +
+                "crashes compositors",
+            command.environment["MESA_GL_VERSION_OVERRIDE"],
+        )
     }
 
     @Test
@@ -257,6 +273,40 @@ class ProotCommandFactoryTest {
         assertNull(environment["DEX_GPU_BRIDGE"])
         assertNull(environment["GALLIUM_DRIVER"])
         assertNull(environment["VTEST_SOCKET_NAME"])
+    }
+
+    @Test
+    fun `terminals render like the desktop at the GPU stage`() {
+        val gpuShell = ProotCommandFactory.interactiveShell(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            sharedFolderDir = null,
+            graphicsBridgeEnabled = true,
+            rendererStage = RendererStage.GPU_VIRGL,
+        )
+        assertEquals("virpipe", gpuShell.environment["GALLIUM_DRIVER"])
+        assertEquals("1", gpuShell.environment["LIBGL_ALWAYS_SOFTWARE"])
+
+        val cpuShell = ProotCommandFactory.interactiveShell(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            sharedFolderDir = null,
+            graphicsBridgeEnabled = true,
+            rendererStage = RendererStage.NATIVE,
+        )
+        assertNull("CPU sessions leave GL selection alone", cpuShell.environment["GALLIUM_DRIVER"])
+
+        val gpuStageWithoutBridge = ProotCommandFactory.interactiveShell(
+            paths = paths,
+            rootfsDir = rootfsDir,
+            sharedFolderDir = null,
+            graphicsBridgeEnabled = false,
+            rendererStage = RendererStage.GPU_VIRGL,
+        )
+        assertNull(
+            "no bridge socket means nothing to select",
+            gpuStageWithoutBridge.environment["GALLIUM_DRIVER"],
+        )
     }
 
     @Test

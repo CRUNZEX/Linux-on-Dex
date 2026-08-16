@@ -34,7 +34,7 @@ import cloud_image_bake
 from cloud_image_bake import BakeBootRequest, ImageBakeError
 
 
-RELEASE_VERSION = "1.3.0-beta7"
+RELEASE_VERSION = "1.3.0-beta9"
 
 
 @dataclass(frozen=True)
@@ -577,6 +577,10 @@ GUEST_PACKAGES = (
     # glxgears and glxinfo, so desktop smoothness can be measured on the
     # actual phone instead of estimated (see /usr/local/bin/dex-fps).
     "mesa-utils",
+    # es2gears_x11: the EGL benchmark dex-fps switches to in GPU sessions,
+    # where GLX quietly falls back to the CPU and would measure the wrong
+    # renderer.
+    "mesa-utils-extra",
     "x11-utils",
     "xdotool",
 )
@@ -602,25 +606,79 @@ export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_DESKTOP=gnome
 export XDG_SESSION_MODE=user
 export GDMSESSION=gnome-xorg
-# GNOME Shell/Mutter owns the whole visible desktop. Keep that compositor on
-# llvmpipe even when the app has validated virgl: vendor EGL resets during an
-# application launch otherwise terminate Mutter and leave the X11 root window
-# black root window. `dex-gpu <command>` remains available for explicit native
-# acceleration without putting the session leader on that failure domain.
+# GNOME Shell/Mutter owns the whole visible desktop. The renderer is the
+# app's choice (DEX_RENDERER), made by its sticky fallback ladder plus a
+# per-boot end-to-end probe of the Android GPU bridge:
+#   virpipe  — the whole session renders on the device GPU through the
+#              verified bridge (Mesa treats the vtest transport as a
+#              software winsys, hence LIBGL_ALWAYS_SOFTWARE stays set);
+#   softpipe — the SIGILL ladder's last rung: no JIT at all;
+#   llvmpipe — the safe CPU default.
+# Anything else would run code no one asked for.
 export LIBGL_ALWAYS_SOFTWARE=1
-# The app selects the renderer: llvmpipe by default, softpipe as the last
-# rung of its SIGILL-fallback ladder (DEX_RENDERER=softpipe). Anything else
-# would run code no one asked for.
 case "${DEX_RENDERER:-llvmpipe}" in
     softpipe) export GALLIUM_DRIVER=softpipe ;;
+    virpipe)  export GALLIUM_DRIVER=virpipe ;;
     *)        export GALLIUM_DRIVER=llvmpipe ;;
 esac
+
+# Everything that must differ between a GPU session and a CPU session, in
+# one place, because the renderer can change mid-session (see
+# abandon_gpu_renderer): the GL flavour Mutter talks, GTK4's own renderer,
+# and whether GNOME plays animations (a joy on the GPU, a tax on llvmpipe).
+# The dconf overlay only touches the system layer, so a user's explicit
+# setting still wins.
+#
+# Deliberately NOT set: MESA_GL_VERSION_OVERRIDE. The Android bridge is
+# GLES behind the scenes (Samsung's EGL exposes no desktop GL), and
+# advertising a desktop-GL version virgl cannot fully map invites the
+# compositor into code paths that crash — a Tab S9 report showed GNOME
+# dying with SIGSEGV seconds into exactly such a session. Letting Mesa
+# report only what the bridge really supports is the honest contract, and
+# COGL_DRIVER=gles2 keeps Mutter on the GLES path that maps 1:1 onto the
+# bridge's own contexts.
+apply_renderer_environment() {
+    if [ "$GALLIUM_DRIVER" = virpipe ]; then
+        export COGL_DRIVER=gles2
+        # GTK4 apps draw with GL when the GPU does the work; on the CPU
+        # renderers cairo is faster than software GL.
+        export GSK_RENDERER=gl
+        desired_animations=true
+    else
+        unset COGL_DRIVER
+        export GSK_RENDERER=cairo
+        desired_animations=false
+    fi
+    # Terminals source this from their login profile, so a shell opened at
+    # any point renders exactly like the desktop does right now.
+    mkdir -p /run/linux-on-dex
+    {
+        printf 'export GALLIUM_DRIVER=%s\n' "$GALLIUM_DRIVER"
+        printf 'export GSK_RENDERER=%s\n' "$GSK_RENDERER"
+    } > /run/linux-on-dex/renderer.env
+    printf '[org/gnome/desktop/interface]\nenable-animations=%s\n' \
+        "$desired_animations" > /etc/dconf/db/local.d/10-linux-on-dex-renderer \
+        2>/dev/null || true
+    dconf update 2>/dev/null || true
+}
+apply_renderer_environment
+
+# A GPU desktop that cannot hold itself up must not take the session down:
+# switch to llvmpipe for the remaining restarts and tell the app (it makes
+# the downgrade sticky at the next start, via /tmp which the app owns).
+abandon_gpu_renderer() {
+    log "GPU desktop abandoned: $1; continuing on llvmpipe"
+    export GALLIUM_DRIVER=llvmpipe
+    apply_renderer_environment
+    : > /tmp/.dex-gpu-desktop-failed
+    consecutive_fast_crashes=0
+}
+
 if [ "${DEX_GPU_BRIDGE:-0}" = 1 ]; then
-    log "stable $GALLIUM_DRIVER compositor; native virgl available through dex-gpu"
+    log "$GALLIUM_DRIVER compositor; native virgl available through dex-gpu"
 else
     log "native GPU bridge unavailable; using $GALLIUM_DRIVER"
 fi
-export GSK_RENDERER=cairo
 # Every avoidable helper process matters: Android kills the whole tree once
 # an app's children pass its phantom-process cap. These three switch off
 # the accessibility bus, the gvfs FUSE daemon and GTK's own a11y bridge.
@@ -665,6 +723,31 @@ while [ ! -S /tmp/.X11-unix/X1 ]; do
 done
 log "native X11 ready at $DISPLAY ($RESOLUTION requested)"
 
+# Under virpipe, let the viewer attach before the first GNOME start: its
+# arrival resizes the X screen to the real surface, and resizing beneath a
+# live compositor is the fragile step — a Tab S9 GPU session lost GNOME to
+# SIGSEGV right around it, and the app-side renderer can keep showing a
+# stale frame afterwards. Waiting flips the order: the resize lands on a
+# bare root window and the compositor starts at the final geometry. The
+# app writes the marker on every viewer arrival (and pre-writes it when a
+# session starts behind an already-open display); headless starts simply
+# continue after the grace period.
+VIEWER_ATTACH_GRACE_SECONDS=30
+if [ "$GALLIUM_DRIVER" = virpipe ]; then
+    viewer_wait_seconds=0
+    while [ ! -f /tmp/.dex-viewer-attached ] && \
+            [ "$viewer_wait_seconds" -lt "$VIEWER_ATTACH_GRACE_SECONDS" ]; do
+        sleep 1
+        viewer_wait_seconds=$((viewer_wait_seconds + 1))
+    done
+    if [ -f /tmp/.dex-viewer-attached ]; then
+        log "viewer attached (waited ${viewer_wait_seconds}s); GNOME starts at the final size"
+        sleep 1
+    else
+        log "no viewer within ${VIEWER_ATTACH_GRACE_SECONDS}s; starting GNOME anyway"
+    fi
+fi
+
 GNOME_SESSION_PID=""
 
 stop_desktop_children() {
@@ -699,6 +782,12 @@ FAST_CRASH_SECONDS=60
 
 consecutive_fast_crashes=0
 while [ -S /tmp/.X11-unix/X1 ]; do
+    # The bridge socket disappearing means the Android-side renderer died;
+    # a GNOME started against it now would hang on its first GL context.
+    if [ "$GALLIUM_DRIVER" = virpipe ] && \
+            [ ! -S "${VTEST_SOCKET_NAME:-/tmp/.virgl_test}" ]; then
+        abandon_gpu_renderer "the Android GPU bridge socket is gone"
+    fi
     session_started_at=$(date +%s)
     dbus-run-session -- sh -c '\
         /usr/libexec/gsd-xsettings >>/tmp/gsd-xsettings.log 2>&1 & \
@@ -725,7 +814,15 @@ while [ -S /tmp/.X11-unix/X1 ]; do
     else
         consecutive_fast_crashes=$((consecutive_fast_crashes + 1))
     fi
-    if [ "$consecutive_fast_crashes" -ge "$MAX_CONSECUTIVE_FAST_CRASHES" ]; then
+    # One fast death on the GPU renderer is already conclusive — retrying
+    # a broken GPU path would burn the whole crash budget on it. Exits
+    # forced from outside the session (SIGKILL 137, SIGTERM 143) say
+    # nothing about the renderer and are judged by the shared budget only.
+    if [ "$GALLIUM_DRIVER" = virpipe ] && \
+            [ "$session_runtime" -lt "$FAST_CRASH_SECONDS" ] && \
+            [ "$session_exit_code" -ne 137 ] && [ "$session_exit_code" -ne 143 ]; then
+        abandon_gpu_renderer "GNOME exited $session_exit_code within ${session_runtime}s on the GPU renderer"
+    elif [ "$consecutive_fast_crashes" -ge "$MAX_CONSECUTIVE_FAST_CRASHES" ]; then
         log "GNOME died $consecutive_fast_crashes times within ${FAST_CRASH_SECONDS}s each (last exit $session_exit_code); giving up so the app can change strategy"
         exit "$session_exit_code"
     fi
@@ -916,9 +1013,12 @@ FPS_BENCHMARK_SCRIPT = r"""#!/bin/sh
 #
 # Run it from a terminal on the desktop, or from the app's own terminal —
 # it finds the running session's display and message bus itself, so it works
-# either way. glxgears prints a frame rate every five seconds; the renderer
-# line above it says what is doing the drawing (llvmpipe: the CPU, because
-# no Android device gives an app access to the GPU from a container).
+# either way. The gears benchmark prints a frame rate every five seconds;
+# the renderer line above it says what is doing the drawing.
+#
+# GPU sessions (GALLIUM_DRIVER=virpipe) are measured over EGL: the desktop
+# reaches the GPU through EGL, while GLX quietly falls back to the CPU and
+# would benchmark the wrong renderer.
 set -u
 
 SECONDS_TO_RUN="${1:-20}"
@@ -930,19 +1030,28 @@ if [ -n "$SHELL_PID" ] && [ -r "/proc/$SHELL_PID/environ" ]; then
 fi
 export DISPLAY="${DISPLAY:-:1}"
 
-if ! command -v glxgears >/dev/null; then
-    echo "glxgears is not installed (expected from mesa-utils)"
+GEARS=glxgears
+if [ "${GALLIUM_DRIVER:-}" = virpipe ] && command -v es2gears_x11 >/dev/null; then
+    GEARS=es2gears_x11
+fi
+if ! command -v "$GEARS" >/dev/null; then
+    echo "$GEARS is not installed (expected from mesa-utils / mesa-utils-extra)"
     exit 1
 fi
 
 echo "display:  $DISPLAY"
-glxinfo -B 2>/dev/null | grep -E 'OpenGL renderer|OpenGL version' || \
-    echo "renderer: unknown (glxinfo unavailable)"
-echo "running glxgears for ${SECONDS_TO_RUN}s — each line is a measured frame rate"
+if [ "$GEARS" = es2gears_x11 ]; then
+    eglinfo -B -p x11 2>/dev/null | grep -E 'ES profile renderer|ES profile version' || \
+        echo "renderer: unknown (eglinfo unavailable)"
+else
+    glxinfo -B 2>/dev/null | grep -E 'OpenGL renderer|OpenGL version' || \
+        echo "renderer: unknown (glxinfo unavailable)"
+fi
+echo "running $GEARS for ${SECONDS_TO_RUN}s — each line is a measured frame rate"
 echo
 # vblank_mode=0 stops the driver capping at the display's refresh rate, so
 # the number reflects what the machine can draw rather than what it waits for.
-vblank_mode=0 timeout "$SECONDS_TO_RUN" glxgears -geometry 800x600 2>&1 |
+vblank_mode=0 timeout "$SECONDS_TO_RUN" stdbuf -oL "$GEARS" 2>&1 |
     grep --line-buffered -E 'frames in|FPS'
 echo
 echo "done — the last figures are the steady-state frame rate"
@@ -1033,8 +1142,15 @@ export COLORTERM=truecolor
 
 DESKTOP_PROFILE_SCRIPT = """export DISPLAY="${DISPLAY:-:1}"
 export LIBGL_ALWAYS_SOFTWARE=1
-export GALLIUM_DRIVER=llvmpipe
-export GSK_RENDERER=cairo
+# Terminals render like the desktop: the supervisor publishes its renderer
+# choice (virpipe on the GPU bridge, or a CPU rasterizer) for every login
+# shell to adopt. Without a running desktop the safe CPU default applies.
+if [ -r /run/linux-on-dex/renderer.env ]; then
+    . /run/linux-on-dex/renderer.env
+else
+    export GALLIUM_DRIVER=llvmpipe
+    export GSK_RENDERER=cairo
+fi
 """
 
 ARCHIVE_SIZE_MARKER = "DEX_ROOTFS_GZ_BYTES="
@@ -1050,6 +1166,7 @@ REQUIRED_ARCHIVE_ENTRIES = (
     "usr/local/bin/dex-processes",
     "usr/local/bin/dex-gpu",
     "usr/bin/glxgears",
+    "usr/bin/es2gears_x11",
     "usr/bin/xkbcomp",
     "usr/local/share/linux-on-dex/display-backend",
     "usr/bin/gnome-shell",

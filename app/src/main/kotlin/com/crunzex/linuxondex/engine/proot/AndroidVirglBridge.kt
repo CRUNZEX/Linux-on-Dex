@@ -19,12 +19,22 @@ import java.util.concurrent.TimeUnit
  */
 class AndroidVirglBridge(private val paths: VmPaths) {
 
+    /**
+     * Probe order matters: ANGLE over the device's Vulkan driver comes
+     * first. Real-device vendor EGL stacks accepted the tiny verification
+     * probe but corrupted large frames afterwards — a Mali phone rendered
+     * exactly 481 rows of every desktop frame through system EGL, and a
+     * Tab S9 lost GNOME to SIGSEGV on the same path — while ANGLE is the
+     * compatibility layer built to normalise exactly these differences.
+     * On hosts whose Vulkan is software (the emulator's lavapipe), ANGLE
+     * is rejected by the hardware policy and the ladder continues.
+     */
     enum class Backend(
         val displayName: String,
         val serverArguments: List<String>,
     ) {
-        SYSTEM_EGL("Android EGL", emptyList()),
         ANGLE_VULKAN("bundled ANGLE Vulkan", listOf("--angle-vulkan")),
+        SYSTEM_EGL("Android EGL", emptyList()),
         ANGLE_GL("bundled ANGLE OpenGL", listOf("--angle-gl")),
     }
 

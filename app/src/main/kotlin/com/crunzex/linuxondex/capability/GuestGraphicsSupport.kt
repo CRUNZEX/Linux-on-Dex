@@ -89,9 +89,10 @@ object GuestGraphicsSupport {
             "A GPU node (${verdict.openedNodePath}) is readable, so a guest " +
                 "could use hardware once a matching driver ships in the image."
         Renderer.HARDWARE_VIRGL ->
-            "PRoot can forward Mesa through virpipe to Android EGL/Vulkan. " +
-                "The route is tested at each desktop start and falls back to " +
-                "llvmpipe if this device's driver rejects it."
+            "The whole PRoot desktop can render on this device's GPU: Mesa " +
+                "forwards through virpipe to Android EGL/Vulkan. The route is " +
+                "verified at each desktop start and falls back to llvmpipe by " +
+                "itself if this device's driver rejects it."
         Renderer.SOFTWARE_LLVMPIPE ->
             "No native virgl bridge is packaged and Android denies every GPU " +
                 "node, so the guest uses llvmpipe."

@@ -26,6 +26,7 @@ object DisplayPreferenceKeys {
     // Keys owned by this app.
     const val SUSTAINED_PERFORMANCE = "displaySustainedPerformance"
     const val PREVENT_TEARING = "displayPreventTearing"
+    const val GPU_ACCELERATED_DESKTOP = "displayGpuAcceleratedDesktop"
 
     const val FILTERING_BILINEAR = "bilinear"
     const val FILTERING_NEAREST = "nearest"
@@ -241,6 +242,26 @@ class DisplaySessionPreferences(private val preferences: SharedPreferences) {
         set(enabled) {
             preferences.edit()
                 .putBoolean(DisplayPreferenceKeys.PREVENT_TEARING, enabled).apply()
+        }
+
+    /**
+     * Whether the next PRoot desktop session may render on the device GPU
+     * through the app's graphics bridge. The engine still verifies the
+     * bridge end-to-end each boot and falls back to the CPU renderer by
+     * itself, so this switch only expresses intent.
+     *
+     * Off by default: on the real devices tested, whole-desktop rendering
+     * through the bridge is bounded by per-frame transfers (a Note 10 Lite
+     * never finished painting its first frame; a Tab S9 lost GNOME to a
+     * driver SIGSEGV), while the CPU renderer holds the desktop up
+     * reliably. Per-application acceleration via `dex-gpu` is separate and
+     * unaffected.
+     */
+    var gpuAcceleratedDesktop: Boolean
+        get() = preferences.getBoolean(DisplayPreferenceKeys.GPU_ACCELERATED_DESKTOP, false)
+        set(enabled) {
+            preferences.edit()
+                .putBoolean(DisplayPreferenceKeys.GPU_ACCELERATED_DESKTOP, enabled).apply()
         }
 
     fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) {

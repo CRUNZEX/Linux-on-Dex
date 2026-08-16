@@ -5,6 +5,8 @@ import com.crunzex.linuxondex.about.AboutRepository
 import com.crunzex.linuxondex.about.UpdateNotice
 import com.crunzex.linuxondex.capability.CapabilityProbe
 import com.crunzex.linuxondex.core.DiagnosticsLogExporter
+import com.crunzex.linuxondex.display.DisplayViewerPresence
+import com.crunzex.linuxondex.display.settings.DisplaySessionPreferences
 import com.crunzex.linuxondex.engine.proot.AppManagedNativeX11Server
 import com.crunzex.linuxondex.engine.qemu.QemuVmEngine
 import com.crunzex.linuxondex.engine.runtime.PayloadInstaller
@@ -80,6 +82,12 @@ class AppContainer(context: Context) {
             repository = vmRepository,
             preparedImages = preparedImageRepository,
             usbPassthroughManager = usbPassthroughManager,
+            desktopGpuPreference = {
+                DisplaySessionPreferences(appContext).gpuAcceleratedDesktop
+            },
+            onGuestTmpPrepared = {
+                DisplayViewerPresence.markAttachedIfViewerOpen(appContext)
+            },
         )
     }
 

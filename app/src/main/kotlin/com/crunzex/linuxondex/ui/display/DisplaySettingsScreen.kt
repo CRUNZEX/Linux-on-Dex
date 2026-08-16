@@ -10,6 +10,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.crunzex.linuxondex.display.settings.DisplaySessionPreferences
 import com.crunzex.linuxondex.display.settings.RenderQuality
+import com.crunzex.linuxondex.engine.proot.RendererFallbackLadder
+import com.crunzex.linuxondex.engine.runtime.VmPaths
 import com.crunzex.linuxondex.display.settings.RenderResolutionChoice
 import com.crunzex.linuxondex.display.settings.RenderResolutionMapping
 import com.crunzex.linuxondex.ui.components.AnimatedExpand
@@ -52,6 +54,9 @@ fun DisplaySettingsScreen(
     var keepScreenAwake by remember { mutableStateOf(preferences.keepScreenAwake) }
     var sustainedPerformance by remember { mutableStateOf(preferences.sustainedPerformance) }
     var preventTearing by remember { mutableStateOf(preferences.preventTearing) }
+    var gpuAcceleratedDesktop by remember {
+        mutableStateOf(preferences.gpuAcceleratedDesktop)
+    }
 
     var qualityExpanded by remember { mutableStateOf(false) }
     var exactExpanded by remember { mutableStateOf(false) }
@@ -162,6 +167,29 @@ fun DisplaySettingsScreen(
         item { SectionCaption("Performance") }
         item {
             GroupCard {
+                SwitchRow(
+                    title = "GPU-accelerated desktop (experimental)",
+                    subtitle = "Render the whole Linux desktop through the app's " +
+                        "graphics bridge. On current devices this is usually " +
+                        "slower than the standard renderer and may fail — the " +
+                        "session falls back to the CPU renderer by itself. " +
+                        "Per-app acceleration (dex-gpu) works either way — " +
+                        "applies at the next session start · Native X11 sessions",
+                    checked = gpuAcceleratedDesktop,
+                    onCheckedChange = { enabled ->
+                        preferences.gpuAcceleratedDesktop = enabled
+                        gpuAcceleratedDesktop = enabled
+                        if (enabled) {
+                            // Turning the switch back on means "try the GPU
+                            // again", so a remembered crash-downgrade must not
+                            // keep winning silently.
+                            RendererFallbackLadder.forgetStoredStage(
+                                VmPaths(context).rendererStageFile
+                            )
+                        }
+                    },
+                )
+                RowDivider()
                 SwitchRow(
                     title = "Keep screen awake",
                     subtitle = "Never dim or lock while the Linux display is open",

@@ -29,7 +29,6 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         self.assertNotIn("exec dbus-run-session", supervisor)
         self.assertIn("--renderer-process-limit=2", builder.VSCODE_WRAPPER_SCRIPT)
         self.assertIn("GALLIUM_DRIVER=llvmpipe", supervisor)
-        self.assertNotIn("GALLIUM_DRIVER=virpipe", supervisor)
         syntax_check = subprocess.run(
             ["sh", "-n"],
             input=supervisor,
@@ -39,12 +38,35 @@ class ProotRootfsBuilderTest(unittest.TestCase):
         )
         self.assertEqual(0, syntax_check.returncode, syntax_check.stderr)
 
-    def test_native_gpu_is_opt_in_and_cannot_own_the_gnome_session(self) -> None:
+    def test_gpu_desktop_is_app_gated_and_abandons_itself_safely(self) -> None:
         rendered = builder._render_build_user_data("linuxondex")
+        supervisor = builder.DESKTOP_SUPERVISOR_SCRIPT
 
+        # The app decides per boot (probe + sticky ladder); the supervisor
+        # only honours an explicit DEX_RENDERER=virpipe.
+        self.assertIn('virpipe)  export GALLIUM_DRIVER=virpipe ;;', supervisor)
+        self.assertIn('*)        export GALLIUM_DRIVER=llvmpipe ;;', supervisor)
+        # Mutter talks GLES to the GLES-backed bridge, and no GL version is
+        # forced: lying about bridge capabilities crashed GNOME on Tab S9.
+        self.assertIn("COGL_DRIVER=gles2", supervisor)
+        self.assertNotIn("export MESA_GL_VERSION_OVERRIDE", supervisor)
+        # A GPU desktop that cannot hold itself up downgrades in-session and
+        # tells the app so the downgrade becomes sticky at the next start.
+        self.assertIn("abandon_gpu_renderer", supervisor)
+        self.assertIn("/tmp/.dex-gpu-desktop-failed", supervisor)
+        self.assertIn('[ "$session_exit_code" -ne 137 ]', supervisor)
+        # Terminals adopt whatever the session renders with.
+        self.assertIn("/run/linux-on-dex/renderer.env", supervisor)
+        self.assertIn("/run/linux-on-dex/renderer.env", builder.DESKTOP_PROFILE_SCRIPT)
+        # GPU sessions wait for the viewer so the attach-resize never lands
+        # beneath a live compositor; headless starts continue after a grace.
+        self.assertIn("/tmp/.dex-viewer-attached", supervisor)
+        self.assertIn("VIEWER_ATTACH_GRACE_SECONDS=30", supervisor)
+        # Animations are a GPU-session luxury; CPU sessions keep them off.
+        self.assertIn("enable-animations", supervisor)
+        # The explicit opt-in wrapper stays for CPU sessions.
         self.assertIn("/usr/local/bin/dex-gpu", rendered)
         self.assertIn("GALLIUM_DRIVER=virpipe", builder.GPU_WRAPPER_SCRIPT)
-        self.assertIn("GALLIUM_DRIVER=llvmpipe", builder.DESKTOP_PROFILE_SCRIPT)
         self.assertIn("native Android virgl bridge is unavailable", builder.GPU_WRAPPER_SCRIPT)
         self.assertNotIn("dex-gpu gnome-shell", rendered)
 

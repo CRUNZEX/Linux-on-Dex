@@ -64,13 +64,16 @@ object ProotCommandFactory {
             emptyList()
         }
 
-    /** The supervisor picks its Gallium driver from this. */
-    private fun rendererEnvironment(stage: RendererStage): Map<String, String> =
-        if (stage.usesSoftpipeRenderer) {
-            mapOf("DEX_RENDERER" to "softpipe")
-        } else {
-            emptyMap()
-        }
+    /**
+     * The supervisor picks its Gallium driver from this: virpipe when the
+     * verified Android GPU bridge should render the whole session, softpipe
+     * as the last rung of the SIGILL ladder, llvmpipe otherwise.
+     */
+    private fun rendererEnvironment(stage: RendererStage): Map<String, String> = when {
+        stage.usesGpuBridgeRenderer -> mapOf("DEX_RENDERER" to "virpipe")
+        stage.usesSoftpipeRenderer -> mapOf("DEX_RENDERER" to "softpipe")
+        else -> emptyMap()
+    }
 
     /**
      * Starts `/usr/local/bin/dex-session` — the console container's leader.
@@ -119,7 +122,9 @@ object ProotCommandFactory {
         environment = guestEnvironment(
             paths = paths,
             graphicsBridgeEnabled = graphicsBridgeEnabled,
-            selectVirglDriver = false,
+            // GUI programs launched from a terminal should render exactly
+            // like the desktop: on the GPU bridge when the session does.
+            selectVirglDriver = rendererStage.usesGpuBridgeRenderer && graphicsBridgeEnabled,
         ),
         workingDirectory = paths.vmRootDir,
     )
@@ -261,11 +266,10 @@ object ProotCommandFactory {
             // Mesa categorises virpipe as a software winsys even though the
             // server forwards its rendering to Android's hardware driver.
             "LIBGL_ALWAYS_SOFTWARE" to "1",
-            // Negotiate a baseline the Android emulator and every target
-            // Galaxy support; asking for 3.2 crashes older EGL shims before
-            // virgl can report a capability set.
-            "MESA_GL_VERSION_OVERRIDE" to "3.3",
-            "MESA_GLES_VERSION_OVERRIDE" to "3.1",
+            // No MESA_GL_VERSION_OVERRIDE here, deliberately: the bridge is
+            // GLES behind the scenes, and advertising a desktop-GL version
+            // it cannot fully map invites clients into code paths that
+            // crash (a Tab S9 GNOME SIGSEGV traced back to exactly this).
         )
     }
 

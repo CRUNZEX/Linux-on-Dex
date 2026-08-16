@@ -1,6 +1,7 @@
 package com.crunzex.linuxondex
 
 import android.app.Application
+import com.crunzex.linuxondex.display.DisplayViewerPresence
 import com.crunzex.linuxondex.display.settings.DisplayWindowPerformance
 
 /**
@@ -18,5 +19,6 @@ class LinuxOnDexApp : Application() {
         super.onCreate()
         container = AppContainer(this)
         DisplayWindowPerformance.install(this)
+        DisplayViewerPresence.install(this)
     }
 }
